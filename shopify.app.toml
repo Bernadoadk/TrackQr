@@ -1,17 +1,24 @@
 # Learn more about configuring your app at https://shopify.dev/docs/apps/tools/cli/configuration
 
 client_id = "ba7d96a8b17c88a2da158493ba43fd68"
-name = "TrackQr"
+name = "TrackQr-dev"
 application_url = "https://example.com"
 embedded = true
 
 [build]
 automatically_update_urls_on_dev = true
-include_config_on_deploy = true
 
 [webhooks]
 api_version = "2026-07"
 
+  # ── Compliance webhooks (GDPR) — déclarés dans le Partner Dashboard via
+  # cette section spéciale, PAS comme des subscriptions classiques.
+  [webhooks.privacy_compliance]
+  customer_deletion_url      = "/webhooks/customers/redact"
+  customer_data_request_url  = "/webhooks/customers/data_request"
+  shop_deletion_url          = "/webhooks/shop/redact"
+
+  # ── Webhooks applicatifs classiques
   [[webhooks.subscriptions]]
   topics = [ "app/uninstalled" ]
   uri = "/webhooks/app/uninstalled"
@@ -20,9 +27,27 @@ api_version = "2026-07"
   topics = [ "app/scopes_update" ]
   uri = "/webhooks/app/scopes_update"
 
+  [[webhooks.subscriptions]]
+  topics = [ "app_subscriptions/update" ]
+  uri = "/webhooks/app/subscriptions_update"
+
+  # ⚠ orders/create et orders/paid contiennent des "protected customer data"
+  # (nom, email, adresse client). L'app DOIT être approuvée pour ces données
+  # par Shopify — voir la procédure plus bas.
+  [[webhooks.subscriptions]]
+  topics = [ "orders/create" ]
+  uri = "/webhooks/orders/create"
+
+  [[webhooks.subscriptions]]
+  topics = [ "orders/paid" ]
+  uri = "/webhooks/orders/paid"
+
 [access_scopes]
 # Learn more at https://shopify.dev/docs/apps/tools/cli/configuration#access_scopes
-scopes = "write_products,write_metaobjects,write_metaobject_definitions"
+# read_products  — needed for the QR Create page product picker
+# read_discounts — needed for the QR promo type
+# read_orders    — needed for order webhook attribution
+scopes = "write_products,read_products,write_discounts,read_discounts,read_orders,write_metaobjects,write_metaobject_definitions"
 
 [auth]
 redirect_urls = [ "https://example.com/api/auth" ]

@@ -1,0 +1,18 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npx react-router *)",
+      "Bash(npx tsc *)",
+      "Bash(npx prisma *)",
+      "Bash(dir \"C:\\\\Users\\\\Bernado ADIKPETO\\\\Desktop\\\\my_project\\\\track-qr\\\\design_add\")",
+      "Bash(npm install *)",
+      "Bash(cp \"C:\\\\Users\\\\Bernado ADIKPETO\\\\Desktop\\\\my_project\\\\track-qr\\\\app\\\\routes\\\\app.campaigns.\\\\$id.edit.tsx\" \"C:\\\\Users\\\\Bernado ADIKPETO\\\\Desktop\\\\my_project\\\\track-qr\\\\app\\\\routes\\\\app.campaigns_.\\\\$id.edit.tsx\" && echo \"done\")",
+      "Bash(node -e \"const QRCode = require\\('qrcode'\\); QRCode.toString\\('hello', {type:'svg'}, \\(err,svg\\)=>{ if\\(!err\\) console.log\\(svg.slice\\(0,200\\)\\) }\\)\")",
+      "PowerShell(Get-Process node -ErrorAction SilentlyContinue)",
+      "Bash(npm run *)",
+      "Bash(grep -v \"node_modules\\\\\\\\\\\\\\\\@shopify\")",
+      "Bash(node -e \"console.log\\('INTEGRATION_KEY=' + require\\('crypto'\\).randomBytes\\(32\\).toString\\('hex'\\)\\)\")",
+      "Bash(node -e \"console.log\\('IP_HASH_PEPPER=' + require\\('crypto'\\).randomBytes\\(24\\).toString\\('base64url'\\)\\)\")"
+    ]
+  }
+}

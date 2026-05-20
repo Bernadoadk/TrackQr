@@ -1,0 +1,368 @@
+import type { HeadersFunction, LoaderFunctionArgs, ActionFunctionArgs } from "react-router";
+import { useMemo, useState } from "react";
+import { useLoaderData, useFetcher, useNavigate, Link } from "react-router";
+import { boundary } from "@shopify/shopify-app-react-router/server";
+import { requireShop } from "../lib/shop.server";
+import { listQrCodes, setActive, deleteQr, duplicateQr, archiveQr } from "../lib/qr-crud.server";
+import { QuotaExceededError } from "../lib/plan.server";
+import { QR_TYPE_TO_UI } from "../lib/qr-types";
+import { Icon } from "../components/ui/Icon";
+import { Button } from "../components/ui/Button";
+import { Badge } from "../components/ui/Badge";
+import { Card } from "../components/ui/Card";
+import { StatCard } from "../components/ui/StatCard";
+import { EmptyState } from "../components/ui/EmptyState";
+import { Segmented } from "../components/ui/Segmented";
+import { useToast } from "../components/ui/Toast";
+import type { QrType } from "@prisma/client";
+
+export const loader = async ({ request }: LoaderFunctionArgs) => {
+  const { shop } = await requireShop(request);
+  const url = new URL(request.url);
+  const items = await listQrCodes(shop.id, {
+    query:  url.searchParams.get("q")      ?? undefined,
+    type:   (url.searchParams.get("type")   as QrType | "all" | null) ?? "all",
+    status: (url.searchParams.get("status") as "all" | "active" | "inactive" | null) ?? "all",
+    sort:   (url.searchParams.get("sort")   as "recent" | "scans" | "conv" | "name" | null) ?? "recent",
+  });
+
+  // Surface the public scan URL origin so the client can copy it without window hacks.
+  const origin = (process.env.SHOPIFY_APP_URL ?? url.origin).replace(/\/$/, "");
+
+  return { items, origin };
+};
+
+export const action = async ({ request }: ActionFunctionArgs) => {
+  const { shop } = await requireShop(request);
+  const form = await request.formData();
+  const intent = String(form.get("intent") ?? "");
+  const id = String(form.get("id") ?? "");
+  if (!id && intent !== "export") return { ok: false, error: "missing-id" } as const;
+
+  try {
+    switch (intent) {
+      case "toggle": {
+        const active = form.get("active") === "1";
+        await setActive(shop.id, id, active);
+        return { ok: true, intent, id } as const;
+      }
+      case "delete": {
+        await deleteQr(shop.id, id);
+        return { ok: true, intent, id } as const;
+      }
+      case "archive": {
+        await archiveQr(shop.id, id);
+        return { ok: true, intent, id } as const;
+      }
+      case "duplicate": {
+        const dup = await duplicateQr(shop, id);
+        return { ok: true, intent, id: dup.id } as const;
+      }
+      default:
+        return { ok: false, error: "unknown-intent" } as const;
+    }
+  } catch (err) {
+    if (err instanceof QuotaExceededError) {
+      return { ok: false, error: "quota", message: err.message } as const;
+    }
+    return { ok: false, error: "server", message: err instanceof Error ? err.message : "Server error" } as const;
+  }
+};
+
+/* ── UI helpers ── */
+const QR_TYPES = [
+  { id: "home",    name: "Homepage",     icon: "home" },
+  { id: "product", name: "Product page", icon: "package" },
+  { id: "link",    name: "Link",         icon: "link" },
+  { id: "atc",     name: "Add to cart",  icon: "shopping-cart" },
+  { id: "promo",   name: "Promo code",   icon: "tag" },
+  { id: "url",     name: "Custom URL",   icon: "globe" },
+  { id: "text",    name: "Text",         icon: "type" },
+  { id: "phone",   name: "Phone",        icon: "phone" },
+  { id: "sms",     name: "SMS",          icon: "message-square" },
+  { id: "email",   name: "Email",        icon: "mail" },
+  { id: "wifi",    name: "WiFi",         icon: "wifi" },
+  { id: "vcard",   name: "vCard",        icon: "id-card" },
+];
+
+function typeMeta(id: string) { return QR_TYPES.find(t => t.id === id) ?? { name: id, icon: "link" }; }
+function fmt(n: number) {
+  if (n >= 10000) return (n / 1000).toFixed(1).replace(/\.0$/, "") + "k";
+  return n.toLocaleString("en-US");
+}
+function fmtPct(n: number, digits = 1) { return n.toFixed(digits) + "%"; }
+function fmtRel(date: Date | string) {
+  const ts = new Date(date).getTime();
+  const diff = Date.now() - ts;
+  const min = Math.floor(diff / 60000);
+  if (min < 1) return "just now";
+  if (min < 60) return `${min}m ago`;
+  const hr = Math.floor(min / 60);
+  if (hr < 24) return `${hr}h ago`;
+  return `${Math.floor(hr / 24)}d ago`;
+}
+
+function QrThumb({ color }: { color: string }) {
+  return (
+    <svg viewBox="0 0 100 100" width="100%" height="100%" style={{ color }}>
+      <rect x="5"  y="5"  width="28" height="28" rx="4" fill="currentColor"/>
+      <rect x="10" y="10" width="18" height="18" rx="2" fill="#fff"/>
+      <rect x="14" y="14" width="10" height="10" rx="1" fill="currentColor"/>
+      <rect x="67" y="5"  width="28" height="28" rx="4" fill="currentColor"/>
+      <rect x="72" y="10" width="18" height="18" rx="2" fill="#fff"/>
+      <rect x="76" y="14" width="10" height="10" rx="1" fill="currentColor"/>
+      <rect x="5"  y="67" width="28" height="28" rx="4" fill="currentColor"/>
+      <rect x="10" y="72" width="18" height="18" rx="2" fill="#fff"/>
+      <rect x="14" y="76" width="10" height="10" rx="1" fill="currentColor"/>
+      {[
+        [40,5],[46,5],[52,5],[58,5],[40,11],[52,11],[40,17],[46,17],[58,17],[40,23],[46,23],[52,23],[58,23],
+        [5,40],[11,40],[23,40],[29,40],[5,46],[17,46],[29,46],[5,52],[11,52],[17,52],[23,52],
+        [40,40],[46,40],[52,40],[58,40],[40,46],[52,46],[58,46],[46,52],[40,58],[46,58],[58,58],
+        [40,67],[52,67],[58,67],[46,73],[40,79],[52,79],[58,79],[46,85],[52,85],[40,91],[58,91],
+      ].map(([x, y], i) => (
+        <rect key={i} x={x} y={y} width="4" height="4" rx="0.8" fill="currentColor" />
+      ))}
+    </svg>
+  );
+}
+
+/* ════════════════════════ Page ════════════════════════ */
+export default function QrManager() {
+  const navigate = useNavigate();
+  const toast    = useToast();
+  const { items, origin } = useLoaderData<typeof loader>();
+  const fetcher  = useFetcher<typeof action>();
+
+  const [query,        setQuery]        = useState("");
+  const [typeFilter,   setTypeFilter]   = useState("all");
+  const [statusFilter, setStatusFilter] = useState("all");
+  const [sortBy,       setSortBy]       = useState("recent");
+
+  const totalScans  = items.reduce((s, q) => s + q.scans, 0);
+  const totalConv   = items.reduce((s, q) => s + q.conversions, 0);
+  const activeCount = items.filter(q => q.active).length;
+  const activePct   = items.length ? (activeCount / items.length) * 100 : 0;
+
+  const filtered = items.filter(q => {
+    if (query && !q.name.toLowerCase().includes(query.toLowerCase())) return false;
+    if (typeFilter !== "all" && QR_TYPE_TO_UI[q.type] !== typeFilter) return false;
+    if (statusFilter === "active"   && !q.active) return false;
+    if (statusFilter === "inactive" &&  q.active) return false;
+    return true;
+  });
+
+  const sorted = useMemo(() => {
+    const arr = [...filtered];
+    if      (sortBy === "scans") arr.sort((a, b) => b.scans - a.scans);
+    else if (sortBy === "conv")  arr.sort((a, b) => b.conversions - a.conversions);
+    else if (sortBy === "name")  arr.sort((a, b) => a.name.localeCompare(b.name));
+    else                         arr.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+    return arr;
+  }, [filtered, sortBy]);
+
+  const activeFilterCount =
+    (typeFilter !== "all" ? 1 : 0) +
+    (statusFilter !== "all" ? 1 : 0) +
+    (query ? 1 : 0);
+
+  const clearAll = () => { setQuery(""); setTypeFilter("all"); setStatusFilter("all"); };
+
+  const submitIntent = (intent: string, id: string, extra: Record<string, string> = {}) => {
+    const fd = new FormData();
+    fd.set("intent", intent);
+    fd.set("id", id);
+    Object.entries(extra).forEach(([k, v]) => fd.set(k, v));
+    fetcher.submit(fd, { method: "post" });
+  };
+
+  return (
+    <>
+      {/* Header */}
+      <div className="page-head">
+        <div className="page-head-left">
+          <div className="page-eyebrow"><Icon name="qr-code" size={11} /> {items.length} codes</div>
+          <h1 className="page-h1">My <span className="em">QR codes</span></h1>
+          <div className="page-sub">Browse, edit and download every code your team has shipped.</div>
+        </div>
+        <div className="page-head-actions">
+          <a href="/qr/export.csv" target="_blank" rel="noopener noreferrer" style={{ textDecoration: "none" }}>
+            <Button variant="secondary" icon="download">Export CSV</Button>
+          </a>
+          <Button variant="primary" icon="plus" onClick={() => navigate("/app/create")}>New QR code</Button>
+        </div>
+      </div>
+
+      {/* Stats */}
+      <div className="grid grid-4 mb-6">
+        <StatCard accent="blue"   label="Total QR codes" value={items.length}         icon="qr-code"      sub={`${activeCount} active`} />
+        <StatCard accent="violet" label="Total scans"    value={fmt(totalScans)}      icon="scan" />
+        <StatCard accent="green"  label="Active rate"    value={fmtPct(activePct, 0)} icon="circle-check" sub={`${activeCount} / ${items.length}`} />
+        <StatCard accent="amber"  label="Conversions"    value={fmt(totalConv)}       icon="zap" />
+      </div>
+
+      {/* ── Filterbar ── */}
+      <div className="filterbar">
+        <div className="filterbar-search">
+          <Icon name="search" size={15} />
+          <input type="text" placeholder="Search QR codes by name…" value={query} onChange={e => setQuery(e.target.value)} />
+          {query && (
+            <button className="modal-close" style={{ width: 22, height: 22 }} onClick={() => setQuery("")} aria-label="Clear search">
+              <Icon name="x" size={12} />
+            </button>
+          )}
+        </div>
+        <div className="filterbar-divider" />
+        <div className="filterbar-group">
+          <span className="filter-select-label">Type</span>
+          <select className="filter-select" data-active={typeFilter !== "all"} value={typeFilter} onChange={e => setTypeFilter(e.target.value)}>
+            <option value="all">All types</option>
+            {QR_TYPES.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+          </select>
+        </div>
+        <div className="filterbar-divider" />
+        <div className="filterbar-group">
+          <span className="filter-select-label">Status</span>
+          <Segmented value={statusFilter} onChange={setStatusFilter}
+            options={[{ value: "all", label: "All" }, { value: "active", label: "Active" }, { value: "inactive", label: "Paused" }]} />
+        </div>
+        <div className="filterbar-divider" />
+        <div className="filterbar-group">
+          <span className="filter-select-label">Sort</span>
+          <select className="filter-select" value={sortBy} onChange={e => setSortBy(e.target.value)}>
+            <option value="recent">Most recent</option>
+            <option value="scans">Most scans</option>
+            <option value="conv">Most conversions</option>
+            <option value="name">Name (A→Z)</option>
+          </select>
+        </div>
+      </div>
+
+      <div className="filter-chips">
+        {query && (
+          <span className="filter-chip">
+            <span className="filter-chip-label">Search</span>
+            <span style={{ maxWidth: 180, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>"{query}"</span>
+            <button className="filter-chip-x" onClick={() => setQuery("")} aria-label="Clear search"><Icon name="x" size={10} /></button>
+          </span>
+        )}
+        {typeFilter !== "all" && (
+          <span className="filter-chip">
+            <span className="filter-chip-label">Type</span>
+            {typeMeta(typeFilter).name}
+            <button className="filter-chip-x" onClick={() => setTypeFilter("all")} aria-label="Clear type"><Icon name="x" size={10} /></button>
+          </span>
+        )}
+        {statusFilter !== "all" && (
+          <span className="filter-chip">
+            <span className="filter-chip-label">Status</span>
+            {statusFilter === "active" ? "Active" : "Paused"}
+            <button className="filter-chip-x" onClick={() => setStatusFilter("all")} aria-label="Clear status"><Icon name="x" size={10} /></button>
+          </span>
+        )}
+        {activeFilterCount > 1 && (<button className="filter-clear" onClick={clearAll}>Clear all</button>)}
+        <span className="filter-count">
+          <b>{sorted.length}</b> of {items.length} {items.length === 1 ? "code" : "codes"}
+        </span>
+      </div>
+
+      {/* ── QR grid ── */}
+      {items.length === 0 ? (
+        <Card>
+          <EmptyState
+            icon="qr-code"
+            title="No QR codes yet"
+            desc="Create your first QR code to start tracking scans and conversions."
+            cta={<Link to="/app/create"><Button variant="primary" icon="plus">Create QR code</Button></Link>}
+          />
+        </Card>
+      ) : sorted.length === 0 ? (
+        <Card>
+          <EmptyState
+            icon="qr-code"
+            title="No QR codes match those filters"
+            desc="Try clearing your search or status filter."
+            cta={<Button variant="secondary" onClick={clearAll}>Clear filters</Button>}
+          />
+        </Card>
+      ) : (
+        <div className="grid grid-3" style={{ gap: 16 }}>
+          {sorted.map(qr => {
+            const tm = typeMeta(QR_TYPE_TO_UI[qr.type] ?? "link");
+            const scanLink = `${origin}/s/${qr.slug}`;
+            const fg = (qr.design as { fg?: string })?.fg ?? "#0B1220";
+            return (
+              <Card key={qr.id} hoverLift className="card-pad">
+                <div className="flex items-center gap-3 mb-3" style={{ justifyContent: "space-between" }}>
+                  <Badge tone="brand">
+                    <Icon name={tm.icon} size={11} />
+                    {tm.name}
+                  </Badge>
+                  <Badge tone={qr.active ? "success" : "neutral"} dot>
+                    {qr.active ? "Active" : "Paused"}
+                  </Badge>
+                </div>
+
+                <div style={{
+                  background: "#fff", borderRadius: 10, border: "1px solid var(--border)",
+                  padding: 14, aspectRatio: "1", display: "grid", placeItems: "center",
+                  marginBottom: 14, maxWidth: 220, width: "100%", marginInline: "auto",
+                }}>
+                  <img
+                    src={`/qr/${qr.id}/svg?size=300`}
+                    alt={qr.name}
+                    style={{ width: "100%", height: "100%", objectFit: "contain" }}
+                    onError={(e) => {
+                      // Fallback to static thumb if the server is still warming.
+                      (e.currentTarget as HTMLImageElement).style.display = "none";
+                    }}
+                  />
+                </div>
+
+                <div className="strong" style={{ fontSize: 13.5, marginBottom: 4 }}>{qr.name}</div>
+                <div className="text-xs muted mb-3">Created {fmtRel(qr.createdAt)}</div>
+
+                <div className="flex items-center gap-3" style={{ paddingTop: 10, borderTop: "1px solid var(--border-soft)" }}>
+                  <div style={{ flex: 1 }}>
+                    <div className="text-xs muted" style={{ fontFamily: "var(--ff-mono)", textTransform: "uppercase", letterSpacing: ".06em", fontSize: 10 }}>Scans</div>
+                    <div className="strong num" style={{ fontSize: 16, fontFamily: "var(--ff-display)" }}>{fmt(qr.scans)}</div>
+                  </div>
+                  <div style={{ flex: 1 }}>
+                    <div className="text-xs muted" style={{ fontFamily: "var(--ff-mono)", textTransform: "uppercase", letterSpacing: ".06em", fontSize: 10 }}>Conv.</div>
+                    <div className="strong num" style={{ fontSize: 16, fontFamily: "var(--ff-display)" }}>{fmt(qr.conversions)}</div>
+                  </div>
+                  <div className="flex gap-2">
+                    <Button size="sm" variant="ghost"
+                      onClick={() => {
+                        navigator.clipboard?.writeText(scanLink);
+                        toast({ title: "Link copied", type: "info" });
+                      }}>
+                      <Icon name="copy" size={13} />
+                    </Button>
+                    <Button size="sm" variant="ghost"
+                      onClick={() => submitIntent("toggle", qr.id, { active: qr.active ? "0" : "1" })}>
+                      <Icon name={qr.active ? "pause" : "play"} size={13} />
+                    </Button>
+                    <a href={`/qr/${qr.id}/png`} target="_blank" rel="noopener noreferrer">
+                      <Button size="sm" variant="ghost"><Icon name="download" size={13} /></Button>
+                    </a>
+                    <Button size="sm" variant="ghost"
+                      onClick={() => {
+                        if (!confirm(`Delete "${qr.name}"? This also removes its scans.`)) return;
+                        submitIntent("delete", qr.id);
+                      }}>
+                      <Icon name="trash" size={13} />
+                    </Button>
+                  </div>
+                </div>
+              </Card>
+            );
+          })}
+        </div>
+      )}
+    </>
+  );
+}
+
+export const headers: HeadersFunction = (headersArgs) => {
+  return boundary.headers(headersArgs);
+};

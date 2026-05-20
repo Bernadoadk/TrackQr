@@ -1,0 +1,20 @@
+import type { ActionFunctionArgs } from "react-router";
+import { authenticate } from "../shopify.server";
+import { getShopByDomain } from "../lib/shop.server";
+import { attributeOrder } from "../lib/attribution.server";
+
+/**
+ * Some stores skip the "paid" step (manual orders, draft → completed, COD).
+ * Run attribution on create as well — the upsert in attributeOrder makes it idempotent.
+ */
+export const action = async ({ request }: ActionFunctionArgs) => {
+  const { shop, topic, payload } = await authenticate.webhook(request);
+  const shopRow = await getShopByDomain(shop);
+  if (!shopRow) return new Response();
+  try {
+    await attributeOrder(shopRow.id, payload as Parameters<typeof attributeOrder>[1]);
+  } catch (err) {
+    console.error(`[webhook] ${topic} attribution failed`, err);
+  }
+  return new Response();
+};

@@ -1,18 +1,18 @@
-// This is your Prisma schema file,
-// learn more about it in the docs: https://pris.ly/d/prisma-schema
+// TrackQr schema — full backend
+// learn more: https://pris.ly/d/prisma-schema
 
 generator client {
   provider = "prisma-client-js"
 }
 
-// Note that some adapters may set a maximum length for the String type by default, please ensure your strings are long
-// enough when changing adapters.
-// See https://www.prisma.io/docs/orm/reference/prisma-schema-reference#string for more information
 datasource db {
-  provider = "sqlite"
-  url      = "file:dev.sqlite"
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
 }
 
+/* ─────────────────────────────────────────────────────────
+   Shopify session storage (managed by app-session-storage-prisma)
+   ───────────────────────────────────────────────────────── */
 model Session {
   id            String    @id
   shop          String
@@ -31,4 +31,319 @@ model Session {
   emailVerified Boolean?  @default(false)
   refreshToken        String?
   refreshTokenExpires DateTime?
+}
+
+/* ─────────────────────────────────────────────────────────
+   Shop — one row per Shopify store using the app
+   ───────────────────────────────────────────────────────── */
+model Shop {
+  id             String   @id @default(cuid())
+  domain         String   @unique
+  name           String?
+  email          String?
+  currency       String?  @default("USD")
+  ianaTimezone   String?
+  primaryLocale  String?
+  installedAt    DateTime @default(now())
+  uninstalledAt  DateTime?
+  // free-form settings (theme, default UTMs, etc.)
+  settings       Json     @default("{}")
+  // FK to active subscription (nullable while on free trial / unsubscribed)
+  activeSubscriptionId String? @unique
+  activeSubscription   Subscription? @relation("ActiveSubscription", fields: [activeSubscriptionId], references: [id])
+
+  subscriptions  Subscription[] @relation("ShopSubscriptions")
+  qrCodes        QrCode[]
+  campaigns      Campaign[]
+  integrations   Integration[]
+  assets         Asset[]
+  webhookEvents  WebhookEvent[]
+
+  @@index([domain])
+}
+
+/* ─────────────────────────────────────────────────────────
+   Plan — seed table: Starter / Growth / Pro
+   ───────────────────────────────────────────────────────── */
+model Plan {
+  id              String   @id  // "starter" | "growth" | "pro"
+  name            String
+  priceMonthly    Int      // in cents (USD)
+  priceAnnual     Int      // /mo billed annually (cents)
+  trialDays       Int      @default(14)
+  // Quotas (null = unlimited)
+  qrCodeLimit     Int?
+  campaignLimit   Int?
+  // History retention in days (null = unlimited)
+  historyDays     Int?
+  // Feature flags
+  attribution     Boolean  @default(false)
+  integrations    Boolean  @default(false)
+  multiStore      Boolean  @default(false)
+  api             Boolean  @default(false)
+  customDomain    Boolean  @default(false)
+  prioritySupport Boolean  @default(false)
+
+  subscriptions   Subscription[]
+}
+
+/* ─────────────────────────────────────────────────────────
+   Subscription — Shopify AppSubscription tracking
+   ───────────────────────────────────────────────────────── */
+enum SubscriptionStatus {
+  PENDING
+  ACTIVE
+  CANCELLED
+  EXPIRED
+  DECLINED
+  FROZEN
+}
+
+enum BillingCycle {
+  MONTHLY
+  ANNUAL
+}
+
+model Subscription {
+  id             String   @id @default(cuid())
+  shopId         String
+  shop           Shop     @relation("ShopSubscriptions", fields: [shopId], references: [id], onDelete: Cascade)
+  planId         String
+  plan           Plan     @relation(fields: [planId], references: [id])
+  cycle          BillingCycle @default(MONTHLY)
+  status         SubscriptionStatus @default(PENDING)
+  // Shopify GraphQL admin id (gid://shopify/AppSubscription/123)
+  shopifyId      String?  @unique
+  currentPeriodEnd DateTime?
+  trialEndsAt    DateTime?
+  cancelledAt    DateTime?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  activeFor      Shop?    @relation("ActiveSubscription")
+
+  @@index([shopId])
+}
+
+/* ─────────────────────────────────────────────────────────
+   QR code
+   ───────────────────────────────────────────────────────── */
+enum QrType {
+  HOME
+  PRODUCT
+  LINK
+  ATC
+  PROMO
+  URL
+  TEXT
+  PHONE
+  SMS
+  EMAIL
+  WIFI
+  VCARD
+}
+
+model QrCode {
+  id            String   @id @default(cuid())
+  shopId        String
+  shop          Shop     @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  // Short slug for /s/:slug
+  slug          String   @unique
+  name          String
+  description   String?
+  type          QrType
+  // Raw destination (url, phone, code, etc.) — interpretation depends on type
+  target        String
+  // Optional reference to a Shopify resource (gid)
+  shopifyRef    String?
+  // Design config — { style, cornerStyle, fg, bg, withLogo, logoAssetId }
+  design        Json     @default("{}")
+  // Label config — { text, position, tone, framed }
+  label         Json     @default("{}")
+  // UTM tracking
+  utmCampaign   String?
+  utmSource    String?
+  utmMedium    String?
+  active        Boolean  @default(true)
+  archivedAt    DateTime?
+  // If this QR is bound to a campaign (1:1 optional)
+  campaignId    String?  @unique
+  campaign      Campaign? @relation(fields: [campaignId], references: [id])
+
+  scans         Scan[]
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@index([shopId, createdAt])
+  @@index([shopId, active])
+}
+
+/* ─────────────────────────────────────────────────────────
+   Scan event — one row per scan
+   ───────────────────────────────────────────────────────── */
+enum DeviceType {
+  MOBILE
+  DESKTOP
+  TABLET
+  UNKNOWN
+}
+
+model Scan {
+  id            String   @id @default(cuid())
+  qrCodeId      String
+  qrCode        QrCode   @relation(fields: [qrCodeId], references: [id], onDelete: Cascade)
+  // anonymized session token (cookie tqr_sid) for attribution
+  sessionToken  String?
+  // SHA-256(ip + dailySalt) — never raw IP
+  ipHash        String?
+  country       String?  // ISO 3166-1 alpha-2
+  device        DeviceType @default(UNKNOWN)
+  os            String?
+  browser       String?
+  userAgent     String?
+  referer       String?
+  // truthy when target completes (placeholder for future "did the redirect happen")
+  delivered     Boolean  @default(true)
+  conversion    Conversion?
+  createdAt     DateTime @default(now())
+
+  @@index([qrCodeId, createdAt])
+  @@index([sessionToken])
+}
+
+/* ─────────────────────────────────────────────────────────
+   Conversion — attributed Shopify order
+   ───────────────────────────────────────────────────────── */
+model Conversion {
+  id            String   @id @default(cuid())
+  scanId        String   @unique
+  scan          Scan     @relation(fields: [scanId], references: [id], onDelete: Cascade)
+  // Shopify order admin gid
+  shopifyOrderId String  @unique
+  orderName     String?
+  amount        Int?     // cents
+  currency      String?
+  attributedAt  DateTime @default(now())
+
+  @@index([shopifyOrderId])
+}
+
+/* ─────────────────────────────────────────────────────────
+   Campaign — landing page editor
+   ───────────────────────────────────────────────────────── */
+enum CampaignStatus {
+  DRAFT
+  ACTIVE
+  PAUSED
+  ENDED
+}
+
+model Campaign {
+  id            String   @id @default(cuid())
+  shopId        String
+  shop          Shop     @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  slug          String   @unique
+  name          String
+  description   String?
+  status        CampaignStatus @default(DRAFT)
+  // Block array: [{ id, type, props, layout, visibility }]
+  blocks        Json     @default("[]")
+  startAt       DateTime?
+  endAt         DateTime?
+  publishedAt   DateTime?
+
+  qrCode        QrCode?
+  leads         Lead[]
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@index([shopId, createdAt])
+  @@index([shopId, status])
+}
+
+/* ─────────────────────────────────────────────────────────
+   Lead — email captured by a campaign
+   ───────────────────────────────────────────────────────── */
+enum LeadSyncStatus {
+  PENDING
+  SYNCED
+  FAILED
+  DB_ONLY
+}
+
+model Lead {
+  id            String   @id @default(cuid())
+  campaignId    String
+  campaign      Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  email         String
+  // optional fields collected (first name, custom)
+  fields        Json     @default("{}")
+  source        String?  // ip + ua summary
+  destination   String   @default("db") // db | klaviyo | mailchimp | hubspot | csv
+  syncStatus    LeadSyncStatus @default(DB_ONLY)
+  syncError     String?
+  createdAt     DateTime @default(now())
+
+  @@index([campaignId, createdAt])
+  @@index([email])
+}
+
+/* ─────────────────────────────────────────────────────────
+   Integration — encrypted credentials per provider per shop
+   ───────────────────────────────────────────────────────── */
+enum IntegrationProvider {
+  KLAVIYO
+  MAILCHIMP
+  HUBSPOT
+}
+
+model Integration {
+  id            String   @id @default(cuid())
+  shopId        String
+  shop          Shop     @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  provider      IntegrationProvider
+  // encrypted token blob (AES-GCM with INTEGRATION_KEY)
+  encryptedToken String
+  // optional list / audience id
+  listId        String?
+  active        Boolean  @default(true)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@unique([shopId, provider])
+  @@index([shopId])
+}
+
+/* ─────────────────────────────────────────────────────────
+   Asset — uploaded files (Shopify Files refs)
+   ───────────────────────────────────────────────────────── */
+model Asset {
+  id            String   @id @default(cuid())
+  shopId        String
+  shop          Shop     @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  // Shopify file gid (gid://shopify/MediaImage/xxx)
+  shopifyFileId String?
+  url           String
+  mimeType      String?
+  byteSize      Int?
+  width         Int?
+  height        Int?
+  createdAt     DateTime @default(now())
+
+  @@index([shopId])
+}
+
+/* ─────────────────────────────────────────────────────────
+   WebhookEvent — dedup table for Shopify webhooks
+   ───────────────────────────────────────────────────────── */
+model WebhookEvent {
+  id            String   @id // X-Shopify-Webhook-Id
+  shopId        String?
+  shop          Shop?    @relation(fields: [shopId], references: [id], onDelete: SetNull)
+  topic         String
+  receivedAt    DateTime @default(now())
+  processedAt   DateTime?
+  error         String?
+
+  @@index([shopId, topic])
 }

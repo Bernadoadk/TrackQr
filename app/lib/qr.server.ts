@@ -42,46 +42,57 @@ export function scanUrl(slug: string, appUrl?: string): string {
 }
 
 /**
- * Compute the merchant-facing redirect target for a QR. UTM params are
- * appended when present and the destination is a URL.
+ * Type of dispatch the /s/:slug route should perform.
+ *   - "redirect"  → 302 to a real URL (http/https/tel/sms/mailto)
+ *   - "landing"   → render an HTML landing page for non-URL payloads
+ *                  (text content, wifi credentials, vcard contact)
  */
-export function buildRedirectTarget(qr: Pick<QrCode, "type" | "target" | "utmCampaign" | "utmSource" | "utmMedium">, shopDomain: string): string {
+export type ScanDispatch =
+  | { kind: "redirect"; url: string }
+  | { kind: "landing"; type: "TEXT" | "WIFI" | "VCARD"; payload: string };
+
+/**
+ * Resolve what the /s/:slug endpoint should do for this QR. UTM params are
+ * appended when the destination is a real http(s) URL.
+ */
+export function buildRedirectTarget(qr: Pick<QrCode, "type" | "target" | "utmCampaign" | "utmSource" | "utmMedium">, shopDomain: string): ScanDispatch {
   switch (qr.type) {
     case "HOME":
-      return ensureUtm(`https://${shopDomain}/`, qr);
+      return { kind: "redirect", url: ensureUtm(`https://${shopDomain}/`, qr) };
     case "PRODUCT": {
-      // target stored as "handle:aurora-tee" or full path
-      const t = qr.target.startsWith("/") ? qr.target : `/products/${qr.target}`;
-      return ensureUtm(`https://${shopDomain}${t}`, qr);
+      const handle = qr.target.replace(/^\//, "").replace(/^products\//, "");
+      return { kind: "redirect", url: ensureUtm(`https://${shopDomain}/products/${handle}`, qr) };
     }
     case "ATC": {
-      // target stored as "variantId:42" or already as /cart/add
-      const t = qr.target.startsWith("/") ? qr.target : `/cart/${qr.target}:1`;
-      return ensureUtm(`https://${shopDomain}${t}`, qr);
+      // target stored as a numeric variant id (e.g. "42569231").
+      // Shopify cart permalink: /cart/{variantId}:{qty}
+      const id = qr.target.replace(/^\//, "").replace(/^cart\//, "");
+      return { kind: "redirect", url: ensureUtm(`https://${shopDomain}/cart/${id}:1`, qr) };
     }
     case "PROMO": {
-      const code = encodeURIComponent(qr.target);
-      return ensureUtm(`https://${shopDomain}/discount/${code}`, qr);
+      const code = encodeURIComponent(qr.target.trim());
+      return { kind: "redirect", url: ensureUtm(`https://${shopDomain}/discount/${code}`, qr) };
     }
     case "LINK":
-    case "URL":
-      return ensureUtm(qr.target, qr);
+    case "URL": {
+      // Auto-add https:// if the merchant typed only the host part.
+      const url = /^https?:\/\//i.test(qr.target) ? qr.target : `https://${qr.target}`;
+      return { kind: "redirect", url: ensureUtm(url, qr) };
+    }
     case "PHONE":
-      return `tel:${qr.target.replace(/\s+/g, "")}`;
+      return { kind: "redirect", url: `tel:${qr.target.replace(/[\s()-]/g, "")}` };
     case "SMS":
-      return `sms:${qr.target.replace(/\s+/g, "")}`;
+      return { kind: "redirect", url: `sms:${qr.target.replace(/[\s()-]/g, "")}` };
     case "EMAIL":
-      return `mailto:${qr.target}`;
+      return { kind: "redirect", url: `mailto:${qr.target.trim()}` };
     case "TEXT":
-      // text type — encode directly in the QR (no redirect target). Return the text as data URL fallback.
-      return `data:text/plain,${encodeURIComponent(qr.target)}`;
+      return { kind: "landing", type: "TEXT",  payload: qr.target };
     case "WIFI":
-      // WIFI: SSID|PASSWORD format stored in target
-      return qr.target;
+      return { kind: "landing", type: "WIFI",  payload: qr.target };
     case "VCARD":
-      return qr.target;
+      return { kind: "landing", type: "VCARD", payload: qr.target };
     default:
-      return qr.target;
+      return { kind: "redirect", url: qr.target };
   }
 }
 

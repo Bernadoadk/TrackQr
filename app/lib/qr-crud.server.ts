@@ -21,9 +21,12 @@ export const CreateQrSchema = z.object({
     logoAssetId: z.string().nullable().optional(),
   }).default({}),
   label: z.object({
-    text: z.string().max(120).optional(),
+    text: z.string().max(20).optional(),
     position: z.enum(["none", "top", "bottom", "left", "right"]).optional(),
     tone: z.enum(["default", "brand", "mono", "muted"]).optional(),
+    frame: z.enum(["none", "outline", "double", "sharp", "notched", "cut", "brackets", "ticket", "scallop", "polaroid", "banner", "header"]).optional(),
+    font: z.string().max(40).optional(),
+    /** Legacy boolean — accepted for backward compatibility (true → "outline"). */
     framed: z.boolean().optional(),
   }).default({}),
   utmCampaign: z.string().max(200).optional().nullable(),

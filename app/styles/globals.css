@@ -1430,17 +1430,29 @@ a { color: inherit; text-decoration: none; }
 /* ── QR live preview stage ── */
 .qr-stage {
   position: relative; display: grid;
-  gap: 12px; padding: 18px;
+  gap: 16px; padding: 24px;
   background: var(--bg-surface);
   border-radius: var(--r-lg);
-  transition: all var(--d-base) var(--ease);
+  transition: padding var(--d-base) var(--ease);
+  /* Always grow to fit content (long horizontal labels). The parent column
+     grid-template-columns is sized with `max-content` so the page accommodates. */
+  width: max-content;
+  margin: 0 auto;
 }
-.qr-stage[data-pos="top"]    { grid-template-areas: "label" "qr";    grid-template-columns: 1fr;      justify-items: center; }
-.qr-stage[data-pos="bottom"] { grid-template-areas: "qr" "label";    grid-template-columns: 1fr;      justify-items: center; }
-.qr-stage[data-pos="left"]   { grid-template-areas: "label qr";      grid-template-columns: auto 1fr; align-items: center; }
-.qr-stage[data-pos="right"]  { grid-template-areas: "qr label";      grid-template-columns: 1fr auto; align-items: center; }
+.qr-stage[data-pos="top"]    { grid-template-areas: "label" "qr";    grid-template-columns: 1fr;       justify-items: center; }
+.qr-stage[data-pos="bottom"] { grid-template-areas: "qr" "label";    grid-template-columns: 1fr;       justify-items: center; }
+/* Left/right: QR sits in a 200px zone (centered around the 160px QR),
+   label cell auto-sizes to text. justify-items centers both inside their cells. */
+.qr-stage[data-pos="left"]   { grid-template-areas: "label qr";      grid-template-columns: auto 200px; align-items: center; justify-items: center; }
+.qr-stage[data-pos="right"]  { grid-template-areas: "qr label";      grid-template-columns: 200px auto; align-items: center; justify-items: center; }
 .qr-stage[data-pos="none"]   { grid-template-areas: "qr";            justify-items: center; }
-.qr-stage[data-frame="yes"]  { border: 2px solid var(--fg-strong); border-radius: var(--r-lg); }
+/* Frame sets its own SVG background; bump the padding so QR + label sit
+   inside the visible frame band without clipping. */
+.qr-stage[data-frame="yes"]                          { padding: 32px; }
+.qr-stage[data-frame="yes"][data-pos="top"],
+.qr-stage[data-frame="yes"][data-pos="bottom"]       { padding: 28px 32px 32px; }
+.qr-stage[data-frame="yes"][data-pos="left"],
+.qr-stage[data-frame="yes"][data-pos="right"]        { padding: 32px 28px; }
 .qr-stage-qr {
   grid-area: qr;
   position: relative;
@@ -1457,12 +1469,26 @@ a { color: inherit; text-decoration: none; }
 .qr-stage-label {
   grid-area: label;
   font-family: var(--ff-display); font-weight: 600; font-size: 16px;
-  letter-spacing: -0.012em; color: var(--fg-strong);
+  letter-spacing: -0.012em;
+  /* Color follows the QR foreground (set by --label-color inline), so the
+     label stays readable against the QR's chosen background regardless of
+     the app's light/dark theme. */
+  color: var(--label-color, var(--fg-strong));
   text-align: center; max-width: 100%; word-break: break-word;
 }
+/* Side labels: center the text both horizontally and vertically.
+   No hard max-width — column auto-grows. 12px horizontal padding inside the
+   cell so the label visually breathes inside its band container. */
 .qr-stage[data-pos="left"] .qr-stage-label,
-.qr-stage[data-pos="right"] .qr-stage-label { text-align: left; font-size: 13px; max-width: 100px; line-height: 1.3; }
-.qr-stage[data-pos="right"] .qr-stage-label { text-align: right; }
+.qr-stage[data-pos="right"] .qr-stage-label {
+  font-size: 13px;
+  line-height: 1.3;
+  text-align: center;
+  align-self: center;
+  justify-self: center;
+  padding: 0 12px;
+  white-space: nowrap;
+}
 .qr-stage[data-tone="brand"] .qr-stage-label { color: var(--accent); }
 .qr-stage[data-tone="muted"] .qr-stage-label { color: var(--fg-muted); }
 .qr-stage[data-tone="mono"]  .qr-stage-label { font-family: var(--ff-mono); font-weight: 500; text-transform: uppercase; letter-spacing: 0.1em; font-size: 11.5px; }

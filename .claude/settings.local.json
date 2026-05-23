@@ -12,7 +12,11 @@
       "Bash(npm run *)",
       "Bash(grep -v \"node_modules\\\\\\\\\\\\\\\\@shopify\")",
       "Bash(node -e \"console.log\\('INTEGRATION_KEY=' + require\\('crypto'\\).randomBytes\\(32\\).toString\\('hex'\\)\\)\")",
-      "Bash(node -e \"console.log\\('IP_HASH_PEPPER=' + require\\('crypto'\\).randomBytes\\(24\\).toString\\('base64url'\\)\\)\")"
+      "Bash(node -e \"console.log\\('IP_HASH_PEPPER=' + require\\('crypto'\\).randomBytes\\(24\\).toString\\('base64url'\\)\\)\")",
+      "Bash(grep -v \"^\\\\\\\\s\")",
+      "Bash(node -e \"const si = require\\('simple-icons'\\); const w = si.siWhatsapp; console.log\\({title: w.title, slug: w.slug, hex: w.hex, pathLen: w.path.length}\\);\")",
+      "Bash(node -e ' *)",
+      "Bash(python -c \"import sys, json; lines = sys.stdin.read\\(\\).strip\\(\\).split\\('\\\\n'\\); [print\\(json.loads\\(l\\).get\\('content',''\\)[:500] if isinstance\\(json.loads\\(l\\).get\\('content',''\\), str\\) else ''\\) for l in lines[-20:] if l]\")"
     ]
   }
 }

@@ -1,7 +1,8 @@
 import type { HeadersFunction, LoaderFunctionArgs, ActionFunctionArgs } from "react-router";
-import React, { useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate, useFetcher } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
+import { useAppBridge } from "@shopify/app-bridge-react";
 import { authenticate } from "../shopify.server";
 import { requireShop } from "../lib/shop.server";
 import { createQr } from "../lib/qr-crud.server";
@@ -13,7 +14,9 @@ import { Card } from "../components/ui/Card";
 import { Field, Input, Textarea } from "../components/ui/Input";
 import { Segmented } from "../components/ui/Segmented";
 import { useToast } from "../components/ui/Toast";
-import { renderQrSvg as renderQrSvgClient } from "../lib/qr-render";
+import { renderQrSvg as renderQrSvgClient, renderFrameSvg, framesForPosition, frameInvertsLabel, FRAME_LABEL, type FrameStyle } from "../lib/qr-render";
+import { LogoPicker, logoSvgDataUrl, type LogoSelection } from "../components/ui/LogoPicker";
+import { LABEL_FONTS, DEFAULT_FONT, getLabelFont } from "../lib/label-fonts";
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   await authenticate.admin(request);
@@ -94,24 +97,44 @@ const LABEL_TONES = [
 ];
 
 /* ── QrSvg (live preview) ──
- * Uses the shared renderQrSvg from app/lib/qr-render.ts so the preview
- * looks identical to what /qr/:id/svg serves after activation.
+ * Renders the QR using shared renderQrSvg, overlaying a brand logo or
+ * a custom uploaded image at the center when set.
  */
 function QrSvg({ text, size = 220, fg, bg, style, cornerStyle, logo }: {
-  text: string; size?: number; fg: string; bg: string; style: QrStyle; cornerStyle: CornerStyle; logo: boolean;
+  text: string; size?: number; fg: string; bg: string;
+  style: QrStyle; cornerStyle: CornerStyle;
+  logo: LogoSelection;
 }) {
   const ref = useRef<HTMLDivElement>(null);
+
+  // Resolve the logo to a data/source URL for embedding in the SVG.
+  const logoSrc =
+    logo.kind === "brand"  && logo.brandId   ? logoSvgDataUrl(logo.brandId, 80) :
+    logo.kind === "custom" && logo.customUrl ? logo.customUrl :
+    "";
+
   useEffect(() => {
     if (!ref.current) return;
     try {
-      const svg = renderQrSvgClient(text || "TrackQr placeholder", {
-        size, fg, bg, style, cornerStyle, withLogo: logo,
+      let svg = renderQrSvgClient(text || "TrackQr placeholder", {
+        size, fg, bg, style, cornerStyle, withLogo: logo.kind !== "none",
       });
+      if (logoSrc) {
+        const logoSize = Math.round(size * 0.20);
+        const logoX = (size - logoSize) / 2;
+        const logoY = (size - logoSize) / 2;
+        // White rounded "punch" behind the logo so it stays readable on dark fg.
+        const pad = 4;
+        const punch = `<rect x="${logoX - pad}" y="${logoY - pad}" width="${logoSize + pad * 2}" height="${logoSize + pad * 2}" rx="8" fill="${bg}"/>`;
+        const overlay = `<image href="${logoSrc}" x="${logoX}" y="${logoY}" width="${logoSize}" height="${logoSize}" preserveAspectRatio="xMidYMid meet"/>`;
+        svg = svg.replace("</svg>", punch + overlay + "</svg>");
+      }
       ref.current.innerHTML = svg;
     } catch (err) {
       console.error("[qr-preview] render failed", err);
     }
-  }, [text, size, fg, bg, style, cornerStyle, logo]);
+  }, [text, size, fg, bg, style, cornerStyle, logoSrc]);
+
   return <div ref={ref} style={{ width: "100%", height: "100%", display: "grid", placeItems: "center" }} />;
 }
 
@@ -149,6 +172,30 @@ function StyleIllus({ qrStyle, size = 36 }: { qrStyle: QrStyle; size?: number })
   );
 }
 
+/* ── FrameMini — small preview of each frame style ──
+ * Uses currentColor so it inherits from a theme-adaptive CSS variable
+ * (var(--fg-strong)) — visible in both light and dark mode regardless
+ * of the QR's chosen foreground color.
+ */
+function FrameMini({ style, labelPos }: { style: FrameStyle; labelPos: LabelPos }) {
+  const w = 56, h = 40;
+  // Render with currentColor so the SVG can inherit from CSS.
+  const svg = renderFrameSvg(style, {
+    width: w, height: h,
+    color: "currentColor",
+    bg: "transparent",
+    inset: 3,
+    strokeWidth: 1.2,
+    bandSize: 12,
+    labelPosition: labelPos === "none" ? undefined : labelPos,
+  });
+  return (
+    <div style={{ width: w, height: h, color: "var(--fg-strong)" }}
+      dangerouslySetInnerHTML={{ __html: svg }}
+    />
+  );
+}
+
 /* ── CornerMini ── */
 function CornerMini({ corner }: { corner: CornerStyle }) {
   const r = corner === "extra-rounded" ? 11 : corner === "rounded" ? 6 : 0;
@@ -180,40 +227,136 @@ function PositionMini({ pos }: { pos: LabelPos }) {
 
 /* ════════════════════════ Page ════════════════════════ */
 
+/* ── Encoders for composite QR types (WiFi, vCard) ── */
+
+function wifiPayload(ssid: string, password: string, encryption: "WPA" | "WEP" | "nopass" = "WPA", hidden = false): string {
+  const esc = (s: string) => s.replace(/([\\;,"':])/g, "\\$1");
+  return `WIFI:T:${encryption};S:${esc(ssid)};P:${esc(password)};${hidden ? "H:true;" : ""};`;
+}
+
+function vcardPayload(o: { fullName: string; title?: string; org?: string; phone?: string; email?: string; url?: string }): string {
+  const lines = [
+    "BEGIN:VCARD",
+    "VERSION:3.0",
+    `FN:${o.fullName}`,
+    o.org   ? `ORG:${o.org}`         : "",
+    o.title ? `TITLE:${o.title}`     : "",
+    o.phone ? `TEL;TYPE=CELL:${o.phone}` : "",
+    o.email ? `EMAIL:${o.email}`     : "",
+    o.url   ? `URL:${o.url}`         : "",
+    "END:VCARD",
+  ];
+  return lines.filter(Boolean).join("\n");
+}
+
 export default function CreateQr() {
   const navigate = useNavigate();
   const toast    = useToast();
   const fetcher  = useFetcher<typeof action>();
+  const shopify  = useAppBridge();
 
   const [name,        setName]        = useState("");
   const [description, setDescription] = useState("");
   const [type,        setType]        = useState<QrTypeId>("product");
   const [target,      setTarget]      = useState("");
+  const [shopifyRef,  setShopifyRef]  = useState<string | null>(null);
+  const [selectedLabel, setSelectedLabel] = useState<string>(""); // human-readable display
+
+  // Composite type sub-fields
+  const [wifiSsid, setWifiSsid]   = useState("");
+  const [wifiPwd,  setWifiPwd]    = useState("");
+  const [wifiEnc,  setWifiEnc]    = useState<"WPA" | "WEP" | "nopass">("WPA");
+  const [vcFull,   setVcFull]     = useState("");
+  const [vcTitle,  setVcTitle]    = useState("");
+  const [vcOrg,    setVcOrg]      = useState("");
+  const [vcEmail,  setVcEmail]    = useState("");
+  const [vcPhone,  setVcPhone]    = useState("");
+  const [vcUrl,    setVcUrl]      = useState("");
 
   // Design
   const [style,       setStyle]       = useState<QrStyle>("rounded");
   const [cornerStyle, setCornerStyle] = useState<CornerStyle>("rounded");
   const [fg,          setFg]          = useState("#0B1220");
   const [bg,          setBg]          = useState("#FFFFFF");
-  const [withLogo,    setWithLogo]    = useState(false);
+  const [logoSel,     setLogoSel]     = useState<LogoSelection>({ kind: "none" });
 
   // Label
   const [labelText, setLabelText] = useState("Scan to discover");
   const [labelPos,  setLabelPos]  = useState<LabelPos>("bottom");
   const [labelTone, setLabelTone] = useState<LabelTone>("default");
-  const [framed,    setFramed]    = useState(false);
+  const [frameStyle, setFrameStyle] = useState<FrameStyle>("none");
+  const [labelFont,  setLabelFont]  = useState<string>(DEFAULT_FONT);
+
+  // List of frame styles available for the current label position.
+  const availableFrames = framesForPosition(labelPos);
+  // Auto-reset to "none" when the user changes position and the current frame isn't supported.
+  useEffect(() => {
+    if (!availableFrames.includes(frameStyle)) setFrameStyle("none");
+  }, [labelPos]);
 
   const [activated,    setActivated]    = useState(false);
   const [generating,   setGenerating]   = useState(false);
   const [renderToken,  setRenderToken]  = useState(0);
 
+  // Measure the actual rendered size of the qr-stage and the label so we can
+  // render the frame SVG at matching dimensions in real time.
+  //
+  // We use a CALLBACK ref pattern for the label (rather than useRef) so the
+  // ResizeObserver is re-attached every time the label element appears /
+  // disappears in the DOM (eg. when the user starts typing a QR name and the
+  // label conditional toggles to true). With a plain useRef, the observer
+  // would attach once at mount when the element was still null.
+  const stageRef = useRef<HTMLDivElement>(null);
+  const [stageSize, setStageSize] = useState({ w: 0, h: 0 });
+  const [labelSize, setLabelSize] = useState({ w: 0, h: 0 });
+
+  useEffect(() => {
+    if (!stageRef.current || typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(entries => {
+      const r = entries[0]?.contentRect;
+      if (!r) return;
+      const w = Math.round(r.width), h = Math.round(r.height);
+      setStageSize(prev => (prev.w === w && prev.h === h ? prev : { w, h }));
+    });
+    ro.observe(stageRef.current);
+    return () => ro.disconnect();
+  }, []);
+
+  // Callback ref — MEMOIZED with useCallback so React sees the same reference
+  // across renders and only calls it when the DOM element actually changes
+  // (attach / detach). Without the memo, every render produces a new function,
+  // React detach→attach the ref, which re-fires the observer and re-renders,
+  // creating an infinite loop ("Maximum update depth exceeded").
+  const labelObsRef = useRef<ResizeObserver | null>(null);
+  const labelRefCb = useCallback((el: HTMLDivElement | null) => {
+    if (labelObsRef.current) {
+      labelObsRef.current.disconnect();
+      labelObsRef.current = null;
+    }
+    if (!el || typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(entries => {
+      const r = entries[0]?.contentRect;
+      if (!r) return;
+      const w = Math.round(r.width), h = Math.round(r.height);
+      setLabelSize(prev => (prev.w === w && prev.h === h ? prev : { w, h }));
+    });
+    ro.observe(el);
+    labelObsRef.current = ro;
+  }, []);
+
+  // Compose the effective target whenever sub-fields change.
+  const effectiveTarget = (() => {
+    if (type === "wifi")  return wifiSsid ? wifiPayload(wifiSsid, wifiPwd, wifiEnc) : "";
+    if (type === "vcard") return vcFull ? vcardPayload({ fullName: vcFull, title: vcTitle, org: vcOrg, phone: vcPhone, email: vcEmail, url: vcUrl }) : "";
+    return target;
+  })();
+
   useEffect(() => {
     setGenerating(true);
     const t = setTimeout(() => { setGenerating(false); setRenderToken(k => k + 1); }, 380);
     return () => clearTimeout(t);
-  }, [style, cornerStyle, fg, bg, withLogo, name, type, target, activated]);
+  }, [style, cornerStyle, fg, bg, logoSel, name, type, effectiveTarget, activated]);
 
-  // React to server response after activation submit.
   useEffect(() => {
     if (fetcher.state !== "idle" || !fetcher.data) return;
     if (fetcher.data.ok) {
@@ -239,29 +382,97 @@ export default function CreateQr() {
     fd.set("name", name);
     fd.set("description", description);
     fd.set("type", type);
-    fd.set("target", target || (tm as { url?: string }).url || "");
-    fd.set("design", JSON.stringify({ style, cornerStyle, fg, bg, withLogo }));
-    fd.set("label", JSON.stringify({ text: labelText, position: labelPos, tone: labelTone, framed }));
+    fd.set("target", effectiveTarget);
+    if (shopifyRef) fd.set("shopifyRef", shopifyRef);
+    fd.set("design", JSON.stringify({
+      style, cornerStyle, fg, bg,
+      withLogo: logoSel.kind !== "none",
+      logoBrand:    logoSel.kind === "brand"  ? logoSel.brandId       : null,
+      logoUrl:      logoSel.kind === "custom" ? logoSel.customUrl     : null,
+      logoAssetId:  logoSel.kind === "custom" ? logoSel.customAssetId : null,
+    }));
+    fd.set("label", JSON.stringify({ text: labelText, position: labelPos, tone: labelTone, frame: frameStyle, font: labelFont }));
     fd.set("activate", "1");
     fetcher.submit(fd, { method: "post" });
   }
 
+  /* Reset destination-specific state when type changes. */
+  function changeType(newType: QrTypeId) {
+    setType(newType);
+    setActivated(false);
+    setTarget("");
+    setShopifyRef(null);
+    setSelectedLabel("");
+  }
+
+  /* App Bridge resource pickers — for product/atc types. */
+  async function pickProduct() {
+    try {
+      const result = await (shopify as unknown as { resourcePicker: (opts: { type: string; multiple: boolean; filter?: { variants?: boolean } }) => Promise<unknown> })
+        .resourcePicker({ type: "product", multiple: false, filter: { variants: false } });
+      const arr = result as Array<{ id: string; title: string; handle: string }> | undefined;
+      if (arr && arr.length > 0) {
+        const p = arr[0];
+        setTarget(p.handle);
+        setShopifyRef(p.id);
+        setSelectedLabel(p.title);
+      }
+    } catch (err) {
+      console.error("resourcePicker failed", err);
+      toast({ type: "error", title: "Picker unavailable", desc: "Open this app inside Shopify admin to pick products." });
+    }
+  }
+
+  async function pickVariant() {
+    try {
+      const result = await (shopify as unknown as { resourcePicker: (opts: { type: string; multiple: boolean; filter?: { variants?: boolean } }) => Promise<unknown> })
+        .resourcePicker({ type: "product", multiple: false, filter: { variants: true } });
+      const arr = result as Array<{ id: string; title: string; handle: string; variants?: Array<{ id: string; title: string }> }> | undefined;
+      if (arr && arr.length > 0) {
+        const p = arr[0];
+        const v = p.variants?.[0];
+        if (v) {
+          // Variant gid → numeric id for /cart/{id}:1
+          const numericId = v.id.split("/").pop() ?? "";
+          setTarget(numericId);
+          setShopifyRef(v.id);
+          setSelectedLabel(`${p.title} — ${v.title}`);
+        }
+      }
+    } catch (err) {
+      console.error("resourcePicker (variant) failed", err);
+      toast({ type: "error", title: "Picker unavailable" });
+    }
+  }
+
   const tm = typeMeta(type);
 
-  const targetForType = () => {
-    if (type === "product") return target || "Aurora Tee — Stone Wash";
-    if (type === "promo")   return target || "FREESHIP";
-    if (type === "wifi")    return target || "Aurora Guest";
-    if (type === "phone" || type === "sms") return target || "+1 (800) 278-7622";
-    if (type === "email")   return target || "hello@aurora.co";
-    return target || (tm as { url?: string }).url || "https://aurora.co";
-  };
-
   const previewText = activated
-    ? `https://trackqr.app/scan/${(name || "untitled").toLowerCase().replace(/[^a-z0-9]+/g, "-")}`
-    : (name ? `${name} · ${targetForType()}` : "TrackQr placeholder");
+    ? `https://trackqr.app/s/${(name || "untitled").toLowerCase().replace(/[^a-z0-9]+/g, "-")}`
+    : effectiveTarget || (name ? `${name} · ${tm.name}` : "TrackQr placeholder");
 
-  const valid     = name.trim().length > 0;
+  const labelFontSpec = getLabelFont(labelFont);
+
+  // Dynamic band size = label cell width (text + horizontal padding inside cell).
+  // Combined with `bandOffset` (the distance from the frame's inner edge to
+  // the label cell's outer edge), the band lines up EXACTLY with the label
+  // CSS-grid cell — never bleeding into the QR area, no matter how short the
+  // text is. No floor is needed thanks to the offset.
+  const dynamicBandSize = (() => {
+    if (labelPos === "left" || labelPos === "right") return labelSize.w + 24;
+    if (labelPos === "top"  || labelPos === "bottom") return labelSize.h + 16;
+    return 48;
+  })();
+  // Frame inset (8) + .qr-stage CSS padding (28) - frame inset (8) = 28-8 = 20
+  // → the band sits 20px inside the frame outline on the label side.
+  const bandOffset = labelPos === "none" ? 0 : 20;
+
+  const valid = name.trim().length > 0 && (
+    type === "home"  ? true :
+    type === "wifi"  ? wifiSsid.length > 0 :
+    type === "vcard" ? vcFull.length > 0 :
+    effectiveTarget.length > 0
+  );
   const showLabel = !!labelText && labelPos !== "none";
 
   return (
@@ -276,7 +487,14 @@ export default function CreateQr() {
         </div>
       </div>
 
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 360px", gap: 24, alignItems: "start" }}>
+      <div style={{
+        display: "grid",
+        // Form takes the rest, preview column grows to fit its content
+        // (long labels in left/right positions need extra horizontal room).
+        gridTemplateColumns: "minmax(0, 1fr) minmax(420px, max-content)",
+        gap: 24,
+        alignItems: "start",
+      }}>
 
         {/* ══ LEFT — Form ══ */}
         <div className="col gap-4">
@@ -306,7 +524,7 @@ export default function CreateQr() {
             <div className="tile-grid">
               {QR_TYPES.filter(t => t.group === "shopify").map(t => (
                 <div key={t.id} className={`tile ${type === t.id ? "active" : ""}`}
-                  onClick={() => { setType(t.id as QrTypeId); setActivated(false); }}>
+                  onClick={() => changeType(t.id as QrTypeId)}>
                   <div className="tile-icon"><Icon name={t.icon} /></div>
                   <div className="tile-name">{t.name}</div>
                 </div>
@@ -319,7 +537,7 @@ export default function CreateQr() {
             <div className="tile-grid">
               {QR_TYPES.filter(t => t.group === "custom").map(t => (
                 <div key={t.id} className={`tile ${type === t.id ? "active" : ""}`}
-                  onClick={() => { setType(t.id as QrTypeId); setActivated(false); }}>
+                  onClick={() => changeType(t.id as QrTypeId)}>
                   <div className="tile-icon"><Icon name={t.icon} /></div>
                   <div className="tile-name">{t.name}</div>
                 </div>
@@ -328,56 +546,119 @@ export default function CreateQr() {
 
             <div className="mt-6">
               {type === "product" && (
-                <Field label="Shopify product" hint="Search and pick from your catalog.">
-                  <Input icon="search" placeholder="Search products…" value={target} onChange={e => setTarget(e.target.value)} />
+                <Field label="Shopify product" hint="Browse your live Shopify catalog.">
+                  <div className="flex items-center gap-2">
+                    <Button variant="secondary" icon="search" onClick={pickProduct}>
+                      {selectedLabel ? "Change product" : "Browse products"}
+                    </Button>
+                    {selectedLabel && (
+                      <div style={{
+                        flex: 1, fontSize: 13, padding: "8px 12px",
+                        background: "var(--bg-sunken)", border: "1px solid var(--border-soft)",
+                        borderRadius: 8, display: "flex", alignItems: "center", gap: 8,
+                      }}>
+                        <Icon name="package" size={14} style={{ color: "var(--accent)" }} />
+                        <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{selectedLabel}</span>
+                        <span style={{ fontSize: 11, fontFamily: "var(--ff-mono)", color: "var(--fg-muted)" }}>/{target}</span>
+                      </div>
+                    )}
+                  </div>
                 </Field>
               )}
+
+              {type === "atc" && (
+                <Field label="Product variant" hint="Visitor lands on cart with this variant added.">
+                  <div className="flex items-center gap-2">
+                    <Button variant="secondary" icon="search" onClick={pickVariant}>
+                      {selectedLabel ? "Change variant" : "Browse products & variants"}
+                    </Button>
+                    {selectedLabel && (
+                      <div style={{
+                        flex: 1, fontSize: 13, padding: "8px 12px",
+                        background: "var(--bg-sunken)", border: "1px solid var(--border-soft)",
+                        borderRadius: 8, display: "flex", alignItems: "center", gap: 8,
+                      }}>
+                        <Icon name="shopping-cart" size={14} style={{ color: "var(--accent)" }} />
+                        <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{selectedLabel}</span>
+                      </div>
+                    )}
+                  </div>
+                </Field>
+              )}
+
               {type === "promo" && (
-                <Field label="Discount code" hint="Visitor lands on cart with code pre-applied.">
-                  <Input placeholder="FREESHIP" value={target} onChange={e => setTarget(e.target.value)} />
+                <Field label="Discount code" hint="Customer lands at checkout with code pre-applied.">
+                  <Input icon="tag" placeholder="FREESHIP" value={target} onChange={e => setTarget(e.target.value.toUpperCase())} />
                 </Field>
               )}
+
               {(type === "link" || type === "url") && (
                 <Field label="Destination URL" hint="Any https:// link.">
                   <Input icon="link" placeholder="https://aurora.co/landing" value={target} onChange={e => setTarget(e.target.value)} />
                 </Field>
               )}
-              {type === "atc" && (
-                <Field label="Variant to add" hint="Selecting will pre-fill the cart line.">
-                  <Input icon="package" placeholder="Aurora Tee — M / Stone Wash" value={target} onChange={e => setTarget(e.target.value)} />
-                </Field>
-              )}
+
               {type === "home" && (
-                <div className="text-sm muted">Scans will open your storefront home page. No additional config required.</div>
+                <div className="text-sm muted" style={{ padding: 12, background: "var(--bg-sunken)", borderRadius: 8, border: "1px solid var(--border-soft)" }}>
+                  <Icon name="home" size={13} style={{ verticalAlign: "-2px", marginRight: 6 }} />
+                  Scans will open your storefront home page. No additional config required.
+                </div>
               )}
+
               {type === "text" && (
-                <Field label="Text content">
-                  <Textarea placeholder="Anything you want — instructions, a message, a serial number…" value={target} onChange={e => setTarget(e.target.value)} />
+                <Field label="Text content" hint="Shown on a landing page when scanned (with copy-to-clipboard).">
+                  <Textarea placeholder="Anything you want — instructions, a message, a serial number…" value={target} onChange={e => setTarget(e.target.value)} rows={3} />
                 </Field>
               )}
+
               {(type === "phone" || type === "sms") && (
-                <Field label={type === "sms" ? "SMS number" : "Phone number"}>
-                  <Input icon={type === "sms" ? "message-square" : "phone"} placeholder="+1 (800) 278-7622" value={target} onChange={e => setTarget(e.target.value)} />
+                <Field label={type === "sms" ? "SMS number" : "Phone number"} hint="International format recommended (E.164).">
+                  <Input icon={type === "sms" ? "message-square" : "phone"} placeholder="+1 800 278 7622" value={target} onChange={e => setTarget(e.target.value)} />
                 </Field>
               )}
+
               {type === "email" && (
-                <Field label="Email address">
+                <Field label="Email address" hint="Tapping the QR opens the visitor's mail app.">
                   <Input icon="mail" placeholder="hello@aurora.co" value={target} onChange={e => setTarget(e.target.value)} />
                 </Field>
               )}
+
               {type === "wifi" && (
-                <div className="grid grid-2">
-                  <Field label="Network name"><Input placeholder="Aurora Guest" /></Field>
-                  <Field label="Password"><Input type="password" placeholder="••••••••" /></Field>
-                </div>
+                <>
+                  <div className="grid grid-2">
+                    <Field label="Network name (SSID)" required>
+                      <Input icon="wifi" placeholder="Aurora Guest" value={wifiSsid} onChange={e => setWifiSsid(e.target.value)} />
+                    </Field>
+                    <Field label="Encryption">
+                      <Segmented value={wifiEnc} onChange={v => setWifiEnc(v as "WPA" | "WEP" | "nopass")}
+                        options={[
+                          { value: "WPA", label: "WPA/WPA2" },
+                          { value: "WEP", label: "WEP" },
+                          { value: "nopass", label: "None" },
+                        ]} />
+                    </Field>
+                  </div>
+                  {wifiEnc !== "nopass" && (
+                    <Field label="Password" className="mt-4">
+                      <Input type="password" placeholder="••••••••" value={wifiPwd} onChange={e => setWifiPwd(e.target.value)} />
+                    </Field>
+                  )}
+                  <div className="text-xs muted mt-2">Camera apps will auto-prompt to connect on iOS &amp; Android.</div>
+                </>
               )}
+
               {type === "vcard" && (
-                <div className="grid grid-2">
-                  <Field label="Full name"><Input placeholder="Aurora Sasaki" /></Field>
-                  <Field label="Title"><Input placeholder="Founder" /></Field>
-                  <Field label="Email"><Input placeholder="aurora@aurora.co" /></Field>
-                  <Field label="Phone"><Input placeholder="+1 (800) 278-7622" /></Field>
-                </div>
+                <>
+                  <div className="grid grid-2">
+                    <Field label="Full name" required><Input placeholder="Aurora Sasaki" value={vcFull} onChange={e => setVcFull(e.target.value)} /></Field>
+                    <Field label="Title"><Input placeholder="Founder" value={vcTitle} onChange={e => setVcTitle(e.target.value)} /></Field>
+                    <Field label="Organization"><Input placeholder="Aurora Studios" value={vcOrg} onChange={e => setVcOrg(e.target.value)} /></Field>
+                    <Field label="Phone"><Input icon="phone" placeholder="+1 800 278 7622" value={vcPhone} onChange={e => setVcPhone(e.target.value)} /></Field>
+                    <Field label="Email"><Input icon="mail" placeholder="aurora@aurora.co" value={vcEmail} onChange={e => setVcEmail(e.target.value)} /></Field>
+                    <Field label="Website"><Input icon="link" placeholder="https://aurora.co" value={vcUrl} onChange={e => setVcUrl(e.target.value)} /></Field>
+                  </div>
+                  <div className="text-xs muted mt-2">Scanning prompts "Add contact" in the camera app.</div>
+                </>
               )}
             </div>
           </Card>
@@ -448,13 +729,8 @@ export default function CreateQr() {
               </Field>
             </div>
 
-            <Field label="Center logo" className="mt-4">
-              <div className="flex items-center gap-2" style={{ height: 36 }}>
-                <Button size="sm" variant={withLogo ? "primary" : "secondary"} icon="image" onClick={() => setWithLogo(!withLogo)}>
-                  {withLogo ? "Logo added" : "Add logo"}
-                </Button>
-                {withLogo && <span className="text-sm muted">aurora-mark.svg · 24×24</span>}
-              </div>
+            <Field label="Center logo" hint="Pick a brand logo or upload your own. Higher error correction is auto-applied." className="mt-4">
+              <LogoPicker value={logoSel} onChange={setLogoSel} />
             </Field>
           </Card>
 
@@ -463,8 +739,51 @@ export default function CreateQr() {
             <div className="section-h" style={{ fontSize: 15, marginBottom: 4 }}>Label</div>
             <div className="section-sub">Add text around the QR — "Scan me", a brand name, or a tagline.</div>
 
-            <Field label="Text" hint="Keep it short — under 30 characters reads best." className="mt-4">
-              <Input value={labelText} onChange={e => setLabelText(e.target.value)} placeholder="Scan to discover" maxLength={60} />
+            <Field label="Text" hint={`${labelText.length}/20 chars · keep it short for the best read`} className="mt-4">
+              <Input
+                value={labelText}
+                onChange={e => setLabelText(e.target.value.slice(0, 20))}
+                placeholder="Scan to discover"
+                maxLength={20}
+              />
+            </Field>
+
+            <Field label="Font" hint="Pick a typeface — each option previews itself." className="mt-4">
+              <select
+                value={labelFont}
+                onChange={e => setLabelFont(e.target.value)}
+                className="filter-select"
+                style={{
+                  height: 38,
+                  width: "100%",
+                  fontFamily: labelFontSpec.family,
+                  fontSize: 14,
+                  fontWeight: labelFontSpec.weight,
+                  letterSpacing: labelFontSpec.letterSpacing,
+                  textTransform: labelFontSpec.textTransform,
+                  padding: "6px 12px",
+                  background: "var(--bg-surface)",
+                  border: "1px solid var(--border)",
+                  borderRadius: 8,
+                  color: "var(--fg-strong)",
+                  cursor: "pointer",
+                }}
+              >
+                {LABEL_FONTS.map(f => (
+                  <option key={f.value} value={f.value}
+                    style={{
+                      fontFamily: f.family,
+                      fontWeight: f.weight,
+                      fontSize: 16,
+                      letterSpacing: f.letterSpacing,
+                      // textTransform is honored by some browsers in <option> but not all.
+                      textTransform: f.textTransform,
+                      padding: "8px 0",
+                    }}>
+                    {f.name}
+                  </option>
+                ))}
+              </select>
             </Field>
 
             <Field label="Position" hint="Where the text sits relative to the QR." className="mt-4">
@@ -478,18 +797,33 @@ export default function CreateQr() {
               </div>
             </Field>
 
-            <div className="grid grid-2 mt-4">
-              <Field label="Tone">
-                <Segmented value={labelTone} onChange={v => setLabelTone(v as LabelTone)} options={LABEL_TONES} />
-              </Field>
-              <Field label="Frame" hint="Outline around the QR + label as one card.">
-                <div className="flex items-center gap-2" style={{ height: 36 }}>
-                  <Button size="sm" variant={framed ? "primary" : "secondary"} icon={framed ? "check" : "plus"} onClick={() => setFramed(!framed)}>
-                    {framed ? "Frame on" : "Add frame"}
-                  </Button>
-                </div>
-              </Field>
-            </div>
+            <Field label="Tone" className="mt-4">
+              <Segmented value={labelTone} onChange={v => setLabelTone(v as LabelTone)} options={LABEL_TONES} />
+            </Field>
+
+            <Field
+              label="Frame style"
+              hint={
+                labelPos === "none"
+                  ? "Decorative outline around the QR. Pick a label position to unlock frames with text zones."
+                  : `Frames with a text zone on the ${labelPos} — adapts to your label.`
+              }
+              className="mt-4"
+            >
+              <div className="style-picker" style={{ gridTemplateColumns: "repeat(4, 1fr)", gap: 8 }}>
+                {availableFrames.map(fs => (
+                  <div key={fs}
+                    className={`style-opt ${frameStyle === fs ? "active" : ""}`}
+                    onClick={() => setFrameStyle(fs)}
+                    title={FRAME_LABEL[fs]}>
+                    <div className="style-opt-illus" style={{ width: 56, height: 40, display: "grid", placeItems: "center" }}>
+                      <FrameMini style={fs} labelPos={labelPos} />
+                    </div>
+                    <div className="style-opt-label" style={{ textTransform: "capitalize" }}>{FRAME_LABEL[fs]}</div>
+                  </div>
+                ))}
+              </div>
+            </Field>
           </Card>
 
           {/* Tracking */}
@@ -511,11 +845,35 @@ export default function CreateQr() {
               <Badge tone={activated ? "success" : "neutral"} dot>{activated ? "Active" : "Draft"}</Badge>
             </div>
 
-            <div className="qr-stage"
+            <div ref={stageRef}
+              className="qr-stage"
               data-pos={showLabel ? labelPos : "none"}
               data-tone={labelTone}
-              data-frame={framed ? "yes" : "no"}
-              style={{ background: bg }}>
+              data-frame={frameStyle !== "none" ? "yes" : "no"}
+              style={{
+                background: bg,
+                // Frame SVG is sized to match the actual rendered .qr-stage
+                // box so it tracks any layout change (label left/right etc.).
+                backgroundImage: frameStyle !== "none" && stageSize.w > 0
+                  ? `url("data:image/svg+xml;utf8,${encodeURIComponent(
+                      renderFrameSvg(frameStyle, {
+                        width:  stageSize.w,
+                        height: stageSize.h,
+                        color: fg,
+                        bg: "transparent",
+                        inset: 8,
+                        strokeWidth: 1.6,
+                        bandSize: dynamicBandSize,
+                        bandOffset,
+                        labelPosition: showLabel ? labelPos : undefined,
+                      })
+                    )}")`
+                  : undefined,
+                backgroundSize: "100% 100%",
+                backgroundRepeat: "no-repeat",
+                border: "none",
+                ["--label-color" as string]: frameInvertsLabel(frameStyle) && showLabel ? bg : fg,
+              }}>
 
               <div className="qr-stage-qr" style={{ background: bg }}>
                 {!valid ? (
@@ -525,7 +883,7 @@ export default function CreateQr() {
                   </div>
                 ) : (
                   <>
-                    <QrSvg key={renderToken} text={previewText} size={220} fg={fg} bg={bg} style={style} cornerStyle={cornerStyle} logo={withLogo} />
+                    <QrSvg key={renderToken} text={previewText} size={220} fg={fg} bg={bg} style={style} cornerStyle={cornerStyle} logo={logoSel} />
                     <div className={`qr-loading-overlay ${generating ? "active" : ""}`}>
                       <div className="qr-loading-spinner" />
                       <div className="qr-loading-text">Generating…</div>
@@ -535,15 +893,29 @@ export default function CreateQr() {
               </div>
 
               {showLabel && valid && (
-                <div className="qr-stage-label">{labelText}</div>
+                <div
+                  ref={labelRefCb}
+                  className="qr-stage-label"
+                  style={{
+                    fontFamily: labelFontSpec.family,
+                    fontWeight: labelFontSpec.weight,
+                    letterSpacing: labelFontSpec.letterSpacing,
+                    textTransform: labelFontSpec.textTransform,
+                  }}
+                >
+                  {labelText}
+                </div>
               )}
             </div>
 
             <div className="text-sm muted mt-4">
               Destination: <span className="strong">{tm.name}</span>
-              {targetForType() && (
-                <div style={{ fontFamily: "var(--ff-mono)", fontSize: 11, marginTop: 6, padding: "6px 8px", background: "var(--bg-sunken)", border: "1px solid var(--border-soft)", borderRadius: 6, wordBreak: "break-all" }}>
-                  {targetForType()}
+              {selectedLabel && (
+                <div style={{ fontSize: 12, marginTop: 6, color: "var(--fg-strong)" }}>{selectedLabel}</div>
+              )}
+              {effectiveTarget && (
+                <div style={{ fontFamily: "var(--ff-mono)", fontSize: 11, marginTop: 6, padding: "6px 8px", background: "var(--bg-sunken)", border: "1px solid var(--border-soft)", borderRadius: 6, wordBreak: "break-all", maxHeight: 80, overflow: "hidden" }}>
+                  {effectiveTarget.length > 160 ? effectiveTarget.slice(0, 160) + "…" : effectiveTarget}
                 </div>
               )}
             </div>

@@ -5,7 +5,24 @@ export function links() {
   return [
     { rel: "preconnect", href: "https://fonts.googleapis.com" },
     { rel: "preconnect", href: "https://fonts.gstatic.com", crossOrigin: "anonymous" },
-    { rel: "stylesheet", href: "https://fonts.googleapis.com/css2?family=Inter:ital,opsz,wght@0,14..32,300..700;1,14..32,300..700&family=Instrument+Serif:ital@0;1&display=swap" },
+    {
+      rel: "stylesheet",
+      href:
+        "https://fonts.googleapis.com/css2" +
+        "?family=Inter:ital,opsz,wght@0,14..32,300..700;1,14..32,300..700" +
+        "&family=Instrument+Serif:ital@0;1" +
+        "&family=JetBrains+Mono:wght@400;500;600" +
+        "&family=Playfair+Display:wght@500;600;700" +
+        "&family=Bebas+Neue" +
+        "&family=Anton" +
+        "&family=Lobster" +
+        "&family=Caveat:wght@500;700" +
+        "&family=Permanent+Marker" +
+        "&family=Pacifico" +
+        "&family=Oswald:wght@500;600" +
+        "&family=Roboto+Slab:wght@500;600" +
+        "&display=swap",
+    },
     { rel: "stylesheet", href: "https://cdn.shopify.com/static/fonts/inter/v4/styles.css" },
     { rel: "stylesheet", href: globalStyles },
   ];

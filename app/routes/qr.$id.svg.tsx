@@ -1,6 +1,8 @@
 import type { LoaderFunctionArgs } from "react-router";
 import prisma from "../db.server";
-import { renderQrSvg, scanUrl, type QrDesign } from "../lib/qr.server";
+import { scanUrl } from "../lib/qr.server";
+import { renderQrSvg, type QrLabelOpts } from "../lib/qr-render";
+import { logoSvgDataUrl } from "../components/ui/LogoPicker";
 
 export const loader = async ({ params, request }: LoaderFunctionArgs) => {
   const id = params.id;
@@ -10,7 +12,36 @@ export const loader = async ({ params, request }: LoaderFunctionArgs) => {
 
   const url = new URL(request.url);
   const size = Math.max(128, Math.min(2048, parseInt(url.searchParams.get("size") ?? "512", 10)));
-  const svg = renderQrSvg(scanUrl(qr.slug), qr.design as QrDesign, size);
+  const includeLabel = url.searchParams.get("plain") !== "1";
+
+  const design = qr.design as Record<string, unknown>;
+  const labelData = qr.label  as Record<string, unknown>;
+
+  // Resolve logo to a data URL or absolute https URL.
+  const logoBrand = (design.logoBrand as string | null | undefined) ?? null;
+  const logoUrl   = (design.logoUrl   as string | null | undefined) ?? null;
+  const logoDataUrl =
+    logoBrand ? logoSvgDataUrl(logoBrand, 80) :
+    logoUrl   ? logoUrl :
+    undefined;
+
+  const svg = renderQrSvg(scanUrl(qr.slug), {
+    size,
+    fg: (design.fg as string) ?? "#0B1220",
+    bg: (design.bg as string) ?? "#FFFFFF",
+    style: (design.style as "square" | "rounded" | "dot" | "classy") ?? "rounded",
+    cornerStyle: (design.cornerStyle as "square" | "rounded" | "extra-rounded") ?? "rounded",
+    withLogo: !!design.withLogo,
+    logoDataUrl,
+    label: includeLabel ? {
+      text:     labelData.text     as string | undefined,
+      position: labelData.position as QrLabelOpts["position"],
+      tone:     labelData.tone     as QrLabelOpts["tone"],
+      font:     labelData.font     as string | undefined,
+      // Accept the new `frame` value, with fallback to legacy boolean `framed`.
+      frame:    (labelData.frame as QrLabelOpts["frame"]) ?? ((labelData.framed as boolean | undefined) ? "outline" : "none"),
+    } : undefined,
+  });
 
   return new Response(svg, {
     status: 200,

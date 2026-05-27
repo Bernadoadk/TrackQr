@@ -1,0 +1,696 @@
+{
+  "buildManifest": {
+    "serverBundles": {
+      "nodejs_eyJydW50aW1lIjoibm9kZWpzIn0": {
+        "id": "nodejs_eyJydW50aW1lIjoibm9kZWpzIn0",
+        "file": "build/server/nodejs_eyJydW50aW1lIjoibm9kZWpzIn0/index.js",
+        "config": {
+          "runtime": "nodejs"
+        }
+      }
+    },
+    "routeIdToServerBundleId": {
+      "routes/webhooks.app.subscriptions_update": "nodejs_eyJydW50aW1lIjoibm9kZWpzIn0",
+      "routes/webhooks.customers.data_request": "nodejs_eyJydW50aW1lIjoibm9kZWpzIn0",
+      "routes/webhooks.app.scopes_update": "nodejs_eyJydW50aW1lIjoibm9kZWpzIn0",
+      "routes/webhooks.customers.redact": "nodejs_eyJydW50aW1lIjoibm9kZWpzIn0",
+      "routes/webhooks.app.uninstalled": "nodejs_eyJydW50aW1lIjoibm9kZWpzIn0",
+      "routes/webhooks.orders.create": "nodejs_eyJydW50aW1lIjoibm9kZWpzIn0",
+      "routes/webhooks.orders.paid": "nodejs_eyJydW50aW1lIjoibm9kZWpzIn0",
+      "routes/webhooks.shop.redact": "nodejs_eyJydW50aW1lIjoibm9kZWpzIn0",
+      "routes/api.files.upload": "nodejs_eyJydW50aW1lIjoibm9kZWpzIn0",
+      "routes/qr.export[.csv]": "nodejs_eyJydW50aW1lIjoibm9kZWpzIn0",
+      "routes/qr.scans[.csv]": "nodejs_eyJydW50aW1lIjoibm9kZWpzIn0",
+      "routes/auth.login": "nodejs_eyJydW50aW1lIjoibm9kZWpzIn0",
+      "routes/qr.$id.pdf": "nodejs_eyJydW50aW1lIjoibm9kZWpzIn0",
+      "routes/qr.$id.png": "nodejs_eyJydW50aW1lIjoibm9kZWpzIn0",
+      "routes/qr.$id.svg": "nodejs_eyJydW50aW1lIjoibm9kZWpzIn0",
+      "routes/c.$slug": "nodejs_eyJydW50aW1lIjoibm9kZWpzIn0",
+      "routes/c.$slug.leads[.csv]": "nodejs_eyJydW50aW1lIjoibm9kZWpzIn0",
+      "routes/s.$slug": "nodejs_eyJydW50aW1lIjoibm9kZWpzIn0",
+      "routes/auth.$": "nodejs_eyJydW50aW1lIjoibm9kZWpzIn0",
+      "routes/_index": "nodejs_eyJydW50aW1lIjoibm9kZWpzIn0",
+      "routes/app.campaigns_.$id.edit": "nodejs_eyJydW50aW1lIjoibm9kZWpzIn0",
+      "routes/app.additional": "nodejs_eyJydW50aW1lIjoibm9kZWpzIn0",
+      "routes/app.qr-manager": "nodejs_eyJydW50aW1lIjoibm9kZWpzIn0",
+      "routes/app.analytics": "nodejs_eyJydW50aW1lIjoibm9kZWpzIn0",
+      "routes/app.campaigns": "nodejs_eyJydW50aW1lIjoibm9kZWpzIn0",
+      "routes/app.pricing": "nodejs_eyJydW50aW1lIjoibm9kZWpzIn0",
+      "routes/app.create": "nodejs_eyJydW50aW1lIjoibm9kZWpzIn0",
+      "routes/app._index": "nodejs_eyJydW50aW1lIjoibm9kZWpzIn0",
+      "routes/app.help": "nodejs_eyJydW50aW1lIjoibm9kZWpzIn0"
+    },
+    "routes": {
+      "root": {
+        "id": "root",
+        "file": "app/root.tsx",
+        "path": "",
+        "config": {}
+      },
+      "routes/webhooks.app.subscriptions_update": {
+        "id": "routes/webhooks.app.subscriptions_update",
+        "parentId": "root",
+        "file": "app/routes/webhooks.app.subscriptions_update.tsx",
+        "path": "webhooks/app/subscriptions_update",
+        "config": {
+          "runtime": "nodejs"
+        }
+      },
+      "routes/webhooks.customers.data_request": {
+        "id": "routes/webhooks.customers.data_request",
+        "parentId": "root",
+        "file": "app/routes/webhooks.customers.data_request.tsx",
+        "path": "webhooks/customers/data_request",
+        "config": {
+          "runtime": "nodejs"
+        }
+      },
+      "routes/webhooks.app.scopes_update": {
+        "id": "routes/webhooks.app.scopes_update",
+        "parentId": "root",
+        "file": "app/routes/webhooks.app.scopes_update.tsx",
+        "path": "webhooks/app/scopes_update",
+        "config": {
+          "runtime": "nodejs"
+        }
+      },
+      "routes/webhooks.customers.redact": {
+        "id": "routes/webhooks.customers.redact",
+        "parentId": "root",
+        "file": "app/routes/webhooks.customers.redact.tsx",
+        "path": "webhooks/customers/redact",
+        "config": {
+          "runtime": "nodejs"
+        }
+      },
+      "routes/webhooks.app.uninstalled": {
+        "id": "routes/webhooks.app.uninstalled",
+        "parentId": "root",
+        "file": "app/routes/webhooks.app.uninstalled.tsx",
+        "path": "webhooks/app/uninstalled",
+        "config": {
+          "runtime": "nodejs"
+        }
+      },
+      "routes/webhooks.orders.create": {
+        "id": "routes/webhooks.orders.create",
+        "parentId": "root",
+        "file": "app/routes/webhooks.orders.create.tsx",
+        "path": "webhooks/orders/create",
+        "config": {
+          "runtime": "nodejs"
+        }
+      },
+      "routes/webhooks.orders.paid": {
+        "id": "routes/webhooks.orders.paid",
+        "parentId": "root",
+        "file": "app/routes/webhooks.orders.paid.tsx",
+        "path": "webhooks/orders/paid",
+        "config": {
+          "runtime": "nodejs"
+        }
+      },
+      "routes/webhooks.shop.redact": {
+        "id": "routes/webhooks.shop.redact",
+        "parentId": "root",
+        "file": "app/routes/webhooks.shop.redact.tsx",
+        "path": "webhooks/shop/redact",
+        "config": {
+          "runtime": "nodejs"
+        }
+      },
+      "routes/api.files.upload": {
+        "id": "routes/api.files.upload",
+        "parentId": "root",
+        "file": "app/routes/api.files.upload.tsx",
+        "path": "api/files/upload",
+        "config": {
+          "runtime": "nodejs"
+        }
+      },
+      "routes/qr.export[.csv]": {
+        "id": "routes/qr.export[.csv]",
+        "parentId": "root",
+        "file": "app/routes/qr.export[.csv].tsx",
+        "path": "qr/export.csv",
+        "config": {
+          "runtime": "nodejs"
+        }
+      },
+      "routes/qr.scans[.csv]": {
+        "id": "routes/qr.scans[.csv]",
+        "parentId": "root",
+        "file": "app/routes/qr.scans[.csv].tsx",
+        "path": "qr/scans.csv",
+        "config": {
+          "runtime": "nodejs"
+        }
+      },
+      "routes/auth.login": {
+        "id": "routes/auth.login",
+        "parentId": "root",
+        "file": "app/routes/auth.login/route.tsx",
+        "path": "auth/login",
+        "config": {
+          "runtime": "nodejs"
+        }
+      },
+      "routes/qr.$id.pdf": {
+        "id": "routes/qr.$id.pdf",
+        "parentId": "root",
+        "file": "app/routes/qr.$id.pdf.tsx",
+        "path": "qr/:id/pdf",
+        "config": {
+          "runtime": "nodejs"
+        }
+      },
+      "routes/qr.$id.png": {
+        "id": "routes/qr.$id.png",
+        "parentId": "root",
+        "file": "app/routes/qr.$id.png.tsx",
+        "path": "qr/:id/png",
+        "config": {
+          "runtime": "nodejs"
+        }
+      },
+      "routes/qr.$id.svg": {
+        "id": "routes/qr.$id.svg",
+        "parentId": "root",
+        "file": "app/routes/qr.$id.svg.tsx",
+        "path": "qr/:id/svg",
+        "config": {
+          "runtime": "nodejs"
+        }
+      },
+      "routes/c.$slug": {
+        "id": "routes/c.$slug",
+        "parentId": "root",
+        "file": "app/routes/c.$slug.tsx",
+        "path": "c/:slug",
+        "config": {
+          "runtime": "nodejs"
+        }
+      },
+      "routes/c.$slug.leads[.csv]": {
+        "id": "routes/c.$slug.leads[.csv]",
+        "parentId": "routes/c.$slug",
+        "file": "app/routes/c.$slug.leads[.csv].tsx",
+        "path": "leads.csv",
+        "config": {}
+      },
+      "routes/s.$slug": {
+        "id": "routes/s.$slug",
+        "parentId": "root",
+        "file": "app/routes/s.$slug.tsx",
+        "path": "s/:slug",
+        "config": {
+          "runtime": "nodejs"
+        }
+      },
+      "routes/auth.$": {
+        "id": "routes/auth.$",
+        "parentId": "root",
+        "file": "app/routes/auth.$.tsx",
+        "path": "auth/*",
+        "config": {
+          "runtime": "nodejs"
+        }
+      },
+      "routes/_index": {
+        "id": "routes/_index",
+        "parentId": "root",
+        "file": "app/routes/_index/route.tsx",
+        "index": true,
+        "config": {
+          "runtime": "nodejs"
+        }
+      },
+      "routes/app": {
+        "id": "routes/app",
+        "parentId": "root",
+        "file": "app/routes/app.tsx",
+        "path": "app",
+        "config": {}
+      },
+      "routes/app.campaigns_.$id.edit": {
+        "id": "routes/app.campaigns_.$id.edit",
+        "parentId": "routes/app",
+        "file": "app/routes/app.campaigns_.$id.edit.tsx",
+        "path": "campaigns/:id/edit",
+        "config": {
+          "runtime": "nodejs"
+        }
+      },
+      "routes/app.additional": {
+        "id": "routes/app.additional",
+        "parentId": "routes/app",
+        "file": "app/routes/app.additional.tsx",
+        "path": "additional",
+        "config": {
+          "runtime": "nodejs"
+        }
+      },
+      "routes/app.qr-manager": {
+        "id": "routes/app.qr-manager",
+        "parentId": "routes/app",
+        "file": "app/routes/app.qr-manager.tsx",
+        "path": "qr-manager",
+        "config": {
+          "runtime": "nodejs"
+        }
+      },
+      "routes/app.analytics": {
+        "id": "routes/app.analytics",
+        "parentId": "routes/app",
+        "file": "app/routes/app.analytics.tsx",
+        "path": "analytics",
+        "config": {
+          "runtime": "nodejs"
+        }
+      },
+      "routes/app.campaigns": {
+        "id": "routes/app.campaigns",
+        "parentId": "routes/app",
+        "file": "app/routes/app.campaigns.tsx",
+        "path": "campaigns",
+        "config": {
+          "runtime": "nodejs"
+        }
+      },
+      "routes/app.pricing": {
+        "id": "routes/app.pricing",
+        "parentId": "routes/app",
+        "file": "app/routes/app.pricing.tsx",
+        "path": "pricing",
+        "config": {
+          "runtime": "nodejs"
+        }
+      },
+      "routes/app.create": {
+        "id": "routes/app.create",
+        "parentId": "routes/app",
+        "file": "app/routes/app.create.tsx",
+        "path": "create",
+        "config": {
+          "runtime": "nodejs"
+        }
+      },
+      "routes/app._index": {
+        "id": "routes/app._index",
+        "parentId": "routes/app",
+        "file": "app/routes/app._index.tsx",
+        "index": true,
+        "config": {
+          "runtime": "nodejs"
+        }
+      },
+      "routes/app.help": {
+        "id": "routes/app.help",
+        "parentId": "routes/app",
+        "file": "app/routes/app.help.tsx",
+        "path": "help",
+        "config": {
+          "runtime": "nodejs"
+        }
+      }
+    }
+  },
+  "reactRouterConfig": {
+    "appDirectory": "C:/Users/Bernado ADIKPETO/Desktop/my_project/track-qr/app",
+    "basename": "/",
+    "buildDirectory": "C:/Users/Bernado ADIKPETO/Desktop/my_project/track-qr/build",
+    "future": {
+      "unstable_optimizeDeps": false,
+      "v8_passThroughRequests": false,
+      "unstable_trailingSlashAwareDataRequests": false,
+      "unstable_previewServerPrerendering": false,
+      "v8_middleware": false,
+      "v8_splitRouteModules": false,
+      "v8_viteEnvironmentApi": false
+    },
+    "routes": {
+      "root": {
+        "id": "root",
+        "file": "root.tsx",
+        "path": ""
+      },
+      "routes/webhooks.app.subscriptions_update": {
+        "id": "routes/webhooks.app.subscriptions_update",
+        "parentId": "root",
+        "file": "routes/webhooks.app.subscriptions_update.tsx",
+        "path": "webhooks/app/subscriptions_update"
+      },
+      "routes/webhooks.customers.data_request": {
+        "id": "routes/webhooks.customers.data_request",
+        "parentId": "root",
+        "file": "routes/webhooks.customers.data_request.tsx",
+        "path": "webhooks/customers/data_request"
+      },
+      "routes/webhooks.app.scopes_update": {
+        "id": "routes/webhooks.app.scopes_update",
+        "parentId": "root",
+        "file": "routes/webhooks.app.scopes_update.tsx",
+        "path": "webhooks/app/scopes_update"
+      },
+      "routes/webhooks.customers.redact": {
+        "id": "routes/webhooks.customers.redact",
+        "parentId": "root",
+        "file": "routes/webhooks.customers.redact.tsx",
+        "path": "webhooks/customers/redact"
+      },
+      "routes/webhooks.app.uninstalled": {
+        "id": "routes/webhooks.app.uninstalled",
+        "parentId": "root",
+        "file": "routes/webhooks.app.uninstalled.tsx",
+        "path": "webhooks/app/uninstalled"
+      },
+      "routes/webhooks.orders.create": {
+        "id": "routes/webhooks.orders.create",
+        "parentId": "root",
+        "file": "routes/webhooks.orders.create.tsx",
+        "path": "webhooks/orders/create"
+      },
+      "routes/webhooks.orders.paid": {
+        "id": "routes/webhooks.orders.paid",
+        "parentId": "root",
+        "file": "routes/webhooks.orders.paid.tsx",
+        "path": "webhooks/orders/paid"
+      },
+      "routes/webhooks.shop.redact": {
+        "id": "routes/webhooks.shop.redact",
+        "parentId": "root",
+        "file": "routes/webhooks.shop.redact.tsx",
+        "path": "webhooks/shop/redact"
+      },
+      "routes/api.files.upload": {
+        "id": "routes/api.files.upload",
+        "parentId": "root",
+        "file": "routes/api.files.upload.tsx",
+        "path": "api/files/upload"
+      },
+      "routes/qr.export[.csv]": {
+        "id": "routes/qr.export[.csv]",
+        "parentId": "root",
+        "file": "routes/qr.export[.csv].tsx",
+        "path": "qr/export.csv"
+      },
+      "routes/qr.scans[.csv]": {
+        "id": "routes/qr.scans[.csv]",
+        "parentId": "root",
+        "file": "routes/qr.scans[.csv].tsx",
+        "path": "qr/scans.csv"
+      },
+      "routes/auth.login": {
+        "id": "routes/auth.login",
+        "parentId": "root",
+        "file": "routes/auth.login/route.tsx",
+        "path": "auth/login"
+      },
+      "routes/qr.$id.pdf": {
+        "id": "routes/qr.$id.pdf",
+        "parentId": "root",
+        "file": "routes/qr.$id.pdf.tsx",
+        "path": "qr/:id/pdf"
+      },
+      "routes/qr.$id.png": {
+        "id": "routes/qr.$id.png",
+        "parentId": "root",
+        "file": "routes/qr.$id.png.tsx",
+        "path": "qr/:id/png"
+      },
+      "routes/qr.$id.svg": {
+        "id": "routes/qr.$id.svg",
+        "parentId": "root",
+        "file": "routes/qr.$id.svg.tsx",
+        "path": "qr/:id/svg"
+      },
+      "routes/c.$slug": {
+        "id": "routes/c.$slug",
+        "parentId": "root",
+        "file": "routes/c.$slug.tsx",
+        "path": "c/:slug"
+      },
+      "routes/c.$slug.leads[.csv]": {
+        "id": "routes/c.$slug.leads[.csv]",
+        "parentId": "routes/c.$slug",
+        "file": "routes/c.$slug.leads[.csv].tsx",
+        "path": "leads.csv"
+      },
+      "routes/s.$slug": {
+        "id": "routes/s.$slug",
+        "parentId": "root",
+        "file": "routes/s.$slug.tsx",
+        "path": "s/:slug"
+      },
+      "routes/auth.$": {
+        "id": "routes/auth.$",
+        "parentId": "root",
+        "file": "routes/auth.$.tsx",
+        "path": "auth/*"
+      },
+      "routes/_index": {
+        "id": "routes/_index",
+        "parentId": "root",
+        "file": "routes/_index/route.tsx",
+        "index": true
+      },
+      "routes/app": {
+        "id": "routes/app",
+        "parentId": "root",
+        "file": "routes/app.tsx",
+        "path": "app"
+      },
+      "routes/app.campaigns_.$id.edit": {
+        "id": "routes/app.campaigns_.$id.edit",
+        "parentId": "routes/app",
+        "file": "routes/app.campaigns_.$id.edit.tsx",
+        "path": "campaigns/:id/edit"
+      },
+      "routes/app.additional": {
+        "id": "routes/app.additional",
+        "parentId": "routes/app",
+        "file": "routes/app.additional.tsx",
+        "path": "additional"
+      },
+      "routes/app.qr-manager": {
+        "id": "routes/app.qr-manager",
+        "parentId": "routes/app",
+        "file": "routes/app.qr-manager.tsx",
+        "path": "qr-manager"
+      },
+      "routes/app.analytics": {
+        "id": "routes/app.analytics",
+        "parentId": "routes/app",
+        "file": "routes/app.analytics.tsx",
+        "path": "analytics"
+      },
+      "routes/app.campaigns": {
+        "id": "routes/app.campaigns",
+        "parentId": "routes/app",
+        "file": "routes/app.campaigns.tsx",
+        "path": "campaigns"
+      },
+      "routes/app.pricing": {
+        "id": "routes/app.pricing",
+        "parentId": "routes/app",
+        "file": "routes/app.pricing.tsx",
+        "path": "pricing"
+      },
+      "routes/app.create": {
+        "id": "routes/app.create",
+        "parentId": "routes/app",
+        "file": "routes/app.create.tsx",
+        "path": "create"
+      },
+      "routes/app._index": {
+        "id": "routes/app._index",
+        "parentId": "routes/app",
+        "file": "routes/app._index.tsx",
+        "index": true
+      },
+      "routes/app.help": {
+        "id": "routes/app.help",
+        "parentId": "routes/app",
+        "file": "routes/app.help.tsx",
+        "path": "help"
+      }
+    },
+    "routeDiscovery": {
+      "mode": "lazy",
+      "manifestPath": "/__manifest"
+    },
+    "serverBuildFile": "index.js",
+    "serverModuleFormat": "esm",
+    "ssr": true,
+    "subResourceIntegrity": false,
+    "allowedActionOrigins": false,
+    "unstable_routeConfig": [
+      {
+        "id": "root",
+        "path": "",
+        "file": "root.tsx",
+        "children": [
+          {
+            "id": "routes/webhooks.app.subscriptions_update",
+            "file": "routes/webhooks.app.subscriptions_update.tsx",
+            "path": "webhooks/app/subscriptions_update"
+          },
+          {
+            "id": "routes/webhooks.customers.data_request",
+            "file": "routes/webhooks.customers.data_request.tsx",
+            "path": "webhooks/customers/data_request"
+          },
+          {
+            "id": "routes/webhooks.app.scopes_update",
+            "file": "routes/webhooks.app.scopes_update.tsx",
+            "path": "webhooks/app/scopes_update"
+          },
+          {
+            "id": "routes/webhooks.customers.redact",
+            "file": "routes/webhooks.customers.redact.tsx",
+            "path": "webhooks/customers/redact"
+          },
+          {
+            "id": "routes/webhooks.app.uninstalled",
+            "file": "routes/webhooks.app.uninstalled.tsx",
+            "path": "webhooks/app/uninstalled"
+          },
+          {
+            "id": "routes/webhooks.orders.create",
+            "file": "routes/webhooks.orders.create.tsx",
+            "path": "webhooks/orders/create"
+          },
+          {
+            "id": "routes/webhooks.orders.paid",
+            "file": "routes/webhooks.orders.paid.tsx",
+            "path": "webhooks/orders/paid"
+          },
+          {
+            "id": "routes/webhooks.shop.redact",
+            "file": "routes/webhooks.shop.redact.tsx",
+            "path": "webhooks/shop/redact"
+          },
+          {
+            "id": "routes/api.files.upload",
+            "file": "routes/api.files.upload.tsx",
+            "path": "api/files/upload"
+          },
+          {
+            "id": "routes/qr.export[.csv]",
+            "file": "routes/qr.export[.csv].tsx",
+            "path": "qr/export.csv"
+          },
+          {
+            "id": "routes/qr.scans[.csv]",
+            "file": "routes/qr.scans[.csv].tsx",
+            "path": "qr/scans.csv"
+          },
+          {
+            "id": "routes/auth.login",
+            "file": "routes/auth.login/route.tsx",
+            "path": "auth/login"
+          },
+          {
+            "id": "routes/qr.$id.pdf",
+            "file": "routes/qr.$id.pdf.tsx",
+            "path": "qr/:id/pdf"
+          },
+          {
+            "id": "routes/qr.$id.png",
+            "file": "routes/qr.$id.png.tsx",
+            "path": "qr/:id/png"
+          },
+          {
+            "id": "routes/qr.$id.svg",
+            "file": "routes/qr.$id.svg.tsx",
+            "path": "qr/:id/svg"
+          },
+          {
+            "id": "routes/c.$slug",
+            "file": "routes/c.$slug.tsx",
+            "path": "c/:slug",
+            "children": [
+              {
+                "id": "routes/c.$slug.leads[.csv]",
+                "file": "routes/c.$slug.leads[.csv].tsx",
+                "path": "leads.csv"
+              }
+            ]
+          },
+          {
+            "id": "routes/s.$slug",
+            "file": "routes/s.$slug.tsx",
+            "path": "s/:slug"
+          },
+          {
+            "id": "routes/auth.$",
+            "file": "routes/auth.$.tsx",
+            "path": "auth/*"
+          },
+          {
+            "id": "routes/_index",
+            "file": "routes/_index/route.tsx",
+            "index": true
+          },
+          {
+            "id": "routes/app",
+            "file": "routes/app.tsx",
+            "path": "app",
+            "children": [
+              {
+                "id": "routes/app.campaigns_.$id.edit",
+                "file": "routes/app.campaigns_.$id.edit.tsx",
+                "path": "campaigns/:id/edit"
+              },
+              {
+                "id": "routes/app.additional",
+                "file": "routes/app.additional.tsx",
+                "path": "additional"
+              },
+              {
+                "id": "routes/app.qr-manager",
+                "file": "routes/app.qr-manager.tsx",
+                "path": "qr-manager"
+              },
+              {
+                "id": "routes/app.analytics",
+                "file": "routes/app.analytics.tsx",
+                "path": "analytics"
+              },
+              {
+                "id": "routes/app.campaigns",
+                "file": "routes/app.campaigns.tsx",
+                "path": "campaigns"
+              },
+              {
+                "id": "routes/app.pricing",
+                "file": "routes/app.pricing.tsx",
+                "path": "pricing"
+              },
+              {
+                "id": "routes/app.create",
+                "file": "routes/app.create.tsx",
+                "path": "create"
+              },
+              {
+                "id": "routes/app._index",
+                "file": "routes/app._index.tsx",
+                "index": true
+              },
+              {
+                "id": "routes/app.help",
+                "file": "routes/app.help.tsx",
+                "path": "help"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "viteConfig": {
+    "build": {
+      "assetsDir": "assets"
+    }
+  }
+}

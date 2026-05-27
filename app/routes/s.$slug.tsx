@@ -20,10 +20,23 @@ export const loader = async ({ params, request }: LoaderFunctionArgs) => {
   if (!qr.active) {
     return errorPage("This QR code is currently paused.", 423);
   }
+  // Lifecycle gates — scheduled activation and auto-expiration.
+  const now = new Date();
+  if (qr.activatesAt && qr.activatesAt > now) {
+    return errorPage("This QR code isn't active yet — check back later.", 425);
+  }
+  if (qr.expiresAt && qr.expiresAt <= now) {
+    return errorPage("This QR code has expired.", 410);
+  }
 
   const parsed = parseRequest(request);
   const scanId = await recordScan(qr.id, parsed);
-  const dispatch = buildRedirectTarget(qr, qr.shop.domain);
+
+  // If the QR is bound to a Campaign, that overrides the type-based target.
+  // We render the campaign landing page (/c/:slug) instead.
+  const dispatch = qr.campaign
+    ? { kind: "redirect" as const, url: `/c/${qr.campaign.slug}` }
+    : buildRedirectTarget(qr, qr.shop.domain);
 
   if (dispatch.kind === "landing") {
     return new Response(landingHtmlFor(dispatch.type, dispatch.payload, qr.name), {

@@ -9,7 +9,6 @@ import { getLabelFont } from "./label-fonts";
 
 export type QrStyle      = "square" | "rounded" | "dot" | "classy";
 export type CornerStyle  = "square" | "rounded" | "extra-rounded";
-export type LabelTone    = "default" | "brand" | "mono" | "muted";
 export type LabelPosition = "none" | "top" | "bottom" | "left" | "right";
 
 export type FrameStyle =
@@ -70,13 +69,24 @@ export function frameInvertsLabel(style: FrameStyle): boolean {
 export interface QrLabelOpts {
   text?: string;
   position?: LabelPosition;
-  tone?: LabelTone;
   /** Frame style. Legacy boolean `framed` maps to "outline" / "none". */
   frame?: FrameStyle;
   /** Optional explicit frame color. Defaults to the QR fg. */
   frameColor?: string;
+  /** Explicit label text color (for frames with a text zone). When unset,
+   *  defaults derive from the QR fg / bg + frame inversion. */
+  labelColor?: string;
+  /** Explicit text-zone band fill color (header/banner/polaroid). Defaults
+   *  to the frame color. Ignored by frames without a band fill. */
+  bandColor?: string;
   /** Font id (matches LABEL_FONTS in app/lib/label-fonts). */
   font?: string;
+  /** Rich-text formatting from the Label section's inline toolbar. */
+  size?: number;
+  bold?: boolean;
+  italic?: boolean;
+  underline?: boolean;
+  align?: "left" | "center" | "right";
 }
 
 type FrameSide = "top" | "bottom" | "left" | "right";
@@ -104,11 +114,15 @@ export function renderFrameSvg(style: FrameStyle, opts: {
    *  so the band sits flush with the CSS-grid label cell rather than the
    *  frame's outer outline. */
   bandOffset?: number;
+  /** Fill color for the label-zone band (header, banner, polaroid).
+   *  Defaults to `color` (the frame outline color). */
+  bandColor?: string;
 }): string {
   const { width: w, height: h, color, bg = "transparent", inset = 6 } = opts;
   const sw = opts.strokeWidth ?? 1.6;
   const band = opts.bandSize ?? 44;
   const off = opts.bandOffset ?? 0;
+  const bandColor = opts.bandColor ?? color;
   const x = inset, y = inset, w2 = w - inset * 2, h2 = h - inset * 2;
   const side = sideFromLabelPos(opts.labelPosition);
 
@@ -190,11 +204,14 @@ export function renderFrameSvg(style: FrameStyle, opts: {
     /* ── Position-aware: text-zone frames ── */
 
     case "polaroid": {
-      // Outline + soft tinted band on label side.
+      // Outline + tinted band on label side. Uses bandColor at lower opacity
+      // when it matches the outline; full opacity when it's customized so the
+      // user actually sees their picked color.
       const { bx, by, bw, bh } = bandRect(side, x, y, w2, h2, band, off);
+      const bandOpacity = bandColor === color ? 0.08 : 1;
       body =
         `<rect x="${x}" y="${y}" width="${w2}" height="${h2}" rx="6" fill="${bg}" stroke="${color}" stroke-width="${sw}"/>` +
-        `<rect x="${bx}" y="${by}" width="${bw}" height="${bh}" fill="${color}" opacity="0.08"/>` +
+        `<rect x="${bx}" y="${by}" width="${bw}" height="${bh}" fill="${bandColor}" opacity="${bandOpacity}"/>` +
         separatorLine(side, x, y, w2, h2, band, color, sw * 0.7, undefined, off);
       break;
     }
@@ -204,7 +221,7 @@ export function renderFrameSvg(style: FrameStyle, opts: {
       const { bx, by, bw, bh } = bandRect(side, x, y, w2, h2, band, off);
       body =
         `<rect x="${x}" y="${y}" width="${w2}" height="${h2}" rx="10" fill="${bg}" stroke="${color}" stroke-width="${sw}"/>` +
-        `<path d="${roundedBandPath(side, bx, by, bw, bh, 10)}" fill="${color}"/>`;
+        `<path d="${roundedBandPath(side, bx, by, bw, bh, 10)}" fill="${bandColor}"/>`;
       break;
     }
 
@@ -213,7 +230,7 @@ export function renderFrameSvg(style: FrameStyle, opts: {
       const { bx, by, bw, bh } = bandRect(side, x, y, w2, h2, band, off);
       body =
         `<rect x="${x}" y="${y}" width="${w2}" height="${h2}" rx="10" fill="${bg}" stroke="${color}" stroke-width="${sw}"/>` +
-        `<path d="${ribbonPath(side, bx, by, bw, bh)}" fill="${color}"/>`;
+        `<path d="${ribbonPath(side, bx, by, bw, bh)}" fill="${bandColor}"/>`;
       break;
     }
 
@@ -300,6 +317,7 @@ export function frameDataUrl(style: FrameStyle, w: number, h: number, color: str
 
 export interface QrRenderOpts {
   size?: number;
+  /** Quiet-zone margin in pixels. Default 8. */
   margin?: number;
   fg?: string;
   bg?: string;
@@ -307,6 +325,12 @@ export interface QrRenderOpts {
   cornerStyle?: CornerStyle;
   withLogo?: boolean;
   logoDataUrl?: string;
+  /** Logo size as fraction of QR size (0.10–0.30). Default 0.20. */
+  logoSize?: number;
+  /** Color of the 3 finder squares. Defaults to fg. */
+  cornerColor?: string;
+  /** Linear gradient for the modules + finders. Overrides flat fg when set. */
+  gradient?: { from: string; to: string; angle?: number } | null;
   /** Optional label + frame. When set, output is a composed SVG (not bare QR). */
   label?: QrLabelOpts;
 }
@@ -323,6 +347,14 @@ export function renderQrSvg(text: string, opts: QrRenderOpts = {}): string {
   const o = { ...DEFAULTS, ...opts };
   const size = opts.size ?? 220;
   const margin = opts.margin ?? 8;
+  const logoSize = opts.logoSize ?? 0.20;
+  const cornerColor = opts.cornerColor ?? o.fg;
+  const gradient = opts.gradient ?? null;
+  // Stable id for the SVG gradient def (avoids collisions across multiple
+  // QR SVGs on the same page — uses size+colors as a poor-man's hash).
+  const gradId = gradient
+    ? `g-${(text.length + size).toString(36)}-${gradient.from.slice(1)}-${gradient.to.slice(1)}`
+    : null;
 
   const qr = QRCode.create(text || "TrackQr placeholder", {
     errorCorrectionLevel: o.withLogo ? "H" : "M",
@@ -363,26 +395,53 @@ export function renderQrSvg(text: string, opts: QrRenderOpts = {}): string {
     const x = margin + cc * cell;
     const y = margin + rr * cell;
     const outer = cell * 7;
-    finders += `<rect x="${x}" y="${y}" width="${outer}" height="${outer}" rx="${fr}" fill="${o.fg}"/>`;
+    finders += `<rect x="${x}" y="${y}" width="${outer}" height="${outer}" rx="${fr}" fill="${cornerColor}"/>`;
     finders += `<rect x="${x + cell}" y="${y + cell}" width="${cell * 5}" height="${cell * 5}" rx="${Math.max(0, fr - cell)}" fill="${o.bg}"/>`;
-    finders += `<rect x="${x + cell * 2}" y="${y + cell * 2}" width="${cell * 3}" height="${cell * 3}" rx="${Math.max(0, fr - cell * 2)}" fill="${o.fg}"/>`;
+    finders += `<rect x="${x + cell * 2}" y="${y + cell * 2}" width="${cell * 3}" height="${cell * 3}" rx="${Math.max(0, fr - cell * 2)}" fill="${cornerColor}"/>`;
   }
 
   // Logo: prefer a passed-in data URL (e.g. from logoSvgDataUrl), else the
   // small built-in placeholder rectangle when `withLogo` is true.
+  // Size is `logoSize` (0.10–0.30) fraction of the QR.
   let logo = "";
   if (opts.logoDataUrl) {
-    const ls = Math.round(size * 0.20);
+    const ls = Math.round(size * logoSize);
     const lx = (size - ls) / 2;
     const ly = (size - ls) / 2;
     logo = `<image href="${opts.logoDataUrl}" x="${lx}" y="${ly}" width="${ls}" height="${ls}" preserveAspectRatio="xMidYMid meet"/>`;
   } else if (o.withLogo) {
-    logo = `<g transform="translate(${size / 2 - 18}, ${size / 2 - 18})"><rect width="36" height="36" rx="8" fill="${o.bg}" stroke="${o.fg}" stroke-width="0.5"/><rect x="4" y="4" width="28" height="28" rx="6" fill="${o.fg}"/></g>`;
+    const ls = Math.round(size * logoSize);
+    const half = ls / 2;
+    logo = `<g transform="translate(${size / 2 - half}, ${size / 2 - half})"><rect width="${ls}" height="${ls}" rx="${ls * 0.22}" fill="${o.bg}" stroke="${o.fg}" stroke-width="0.5"/><rect x="${ls * 0.11}" y="${ls * 0.11}" width="${ls * 0.78}" height="${ls * 0.78}" rx="${ls * 0.17}" fill="${o.fg}"/></g>`;
+  }
+
+  // Gradient def — used by both modules (<g>) and finders if active.
+  // Angle is in degrees; convert to x1/y1/x2/y2 in the 0-1 box.
+  let gradientDef = "";
+  let modulesFill = o.fg;
+  if (gradient && gradId) {
+    const ang = ((gradient.angle ?? 45) * Math.PI) / 180;
+    const cos = Math.cos(ang), sin = Math.sin(ang);
+    // Map angle to gradient stops in object bounding box.
+    const x1 = 0.5 - cos * 0.5, y1 = 0.5 - sin * 0.5;
+    const x2 = 0.5 + cos * 0.5, y2 = 0.5 + sin * 0.5;
+    gradientDef =
+      `<defs><linearGradient id="${gradId}" x1="${x1.toFixed(3)}" y1="${y1.toFixed(3)}" x2="${x2.toFixed(3)}" y2="${y2.toFixed(3)}">` +
+      `<stop offset="0%" stop-color="${gradient.from}"/>` +
+      `<stop offset="100%" stop-color="${gradient.to}"/>` +
+      `</linearGradient></defs>`;
+    modulesFill = `url(#${gradId})`;
+    // Replace the cornerColor fills in `finders` with gradient when corners
+    // weren't explicitly overridden by the user (i.e. they match fg).
+    if (cornerColor === o.fg) {
+      finders = finders.split(`fill="${cornerColor}"`).join(`fill="url(#${gradId})"`);
+    }
   }
 
   const innerSvg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${size} ${size}" width="100%" height="100%">
   <rect width="${size}" height="${size}" fill="${o.bg}"/>
-  <g fill="${o.fg}">${modules}</g>
+  ${gradientDef}
+  <g fill="${modulesFill}">${modules}</g>
   ${finders}
   ${logo}
 </svg>`;
@@ -408,7 +467,6 @@ function wrapWithLabelAndFrame(qrSvg: string, qrSize: number, bg: string, fg: st
   const padding = 24;
   const text = label.text ?? "";
   const pos  = label.position ?? "none";
-  const tone = label.tone ?? "default";
   const frameStyle: FrameStyle =
     label.frame ??
     ((label as { framed?: boolean }).framed ? "outline" : "none");
@@ -416,27 +474,27 @@ function wrapWithLabelAndFrame(qrSvg: string, qrSize: number, bg: string, fg: st
   const frameColor = label.frameColor ?? fg;
   const fontSpec = getLabelFont(label.font);
 
-  // Font stack: respect the user's picked font; "mono" tone still forces the
-  // mono spec for visual consistency.
-  const stackFromTone = tone === "mono"
-    ? `'JetBrains Mono', ui-monospace, monospace`
-    : fontSpec.family;
-  const fontStack = stackFromTone;
-  const fontSize = pos === "left" || pos === "right" ? 14 : 18;
-  const fontWeight = tone === "mono" ? 500 : (fontSpec.weight ?? 600);
+  // Font stack respects the user's picked font.
+  const fontStack = fontSpec.family;
+  // Honor the rich-text toolbar size; fall back to the position default.
+  const fontSize = label.size ?? (pos === "left" || pos === "right" ? 14 : 18);
+  // Bold from the toolbar wins over the font's natural weight.
+  const fontWeight = label.bold ? 700 : (fontSpec.weight ?? 600);
+  const fontStyle  = label.italic ? "italic" : "normal";
+  const decoration = label.underline ? "underline" : "none";
   const transform = [
-    tone === "mono"            ? `letter-spacing:1.2px;text-transform:uppercase;` : "",
-    fontSpec.letterSpacing     ? `letter-spacing:${fontSpec.letterSpacing};` : "",
-    fontSpec.textTransform     ? `text-transform:${fontSpec.textTransform};` : "",
+    fontSpec.letterSpacing ? `letter-spacing:${fontSpec.letterSpacing};` : "",
+    fontSpec.textTransform ? `text-transform:${fontSpec.textTransform};` : "",
+    `font-style:${fontStyle};`,
+    `text-decoration:${decoration};`,
   ].filter(Boolean).join("");
   // For frames that overlay a dark band where the label sits (header, banner),
   // invert the label color so it stays readable against the band fill.
+  // When the user has explicitly picked a `labelColor`, that always wins.
   const inverted = frameInvertsLabel(frameStyle);
   const baseColor = inverted ? bg : fg;
-  const color = tone === "brand" ? "#2563EB" :
-                tone === "muted" ? (inverted ? bg : "#94A3B8") :
-                tone === "mono"  ? baseColor :
-                baseColor;
+  const color = label.labelColor ?? baseColor;
+  const align = label.align ?? "center";
 
   // Approximate text bbox (no DOM available server-side).
   const charWidth = fontSize * 0.55;
@@ -452,32 +510,34 @@ function wrapWithLabelAndFrame(qrSvg: string, qrSize: number, bg: string, fg: st
   let qrX = 0, qrY = 0;
   let textX = qrSize / 2;
   let textY = 0;
-  let textAnchor: "start" | "middle" | "end" = "middle";
+  // Map the user's alignment to SVG's text-anchor for the chosen column.
+  const textAnchor: "start" | "middle" | "end" =
+    align === "left" ? "start" : align === "right" ? "end" : "middle";
+  // Resolve the X coordinate of `textX` to the appropriate column edge.
+  // `colLeft` / `colRight` bracket the column; `pad` lets the text breathe.
+  const xForAlign = (colLeft: number, colRight: number, pad = 8): number =>
+    align === "left"  ? colLeft + pad :
+    align === "right" ? colRight - pad :
+                        (colLeft + colRight) / 2;
 
   if (pos === "top") {
     outerH = qrSize + textHeight + 12;
     qrY = textHeight + 12;
-    textX = qrSize / 2;
+    textX = xForAlign(0, qrSize);
     textY = textHeight - 8;
-    textAnchor = "middle";
   } else if (pos === "bottom") {
     outerH = qrSize + textHeight + 12;
-    textX = qrSize / 2;
+    textX = xForAlign(0, qrSize);
     textY = qrSize + textHeight - 4;
-    textAnchor = "middle";
   } else if (pos === "left") {
     outerW = qrSize + textWidth + 16;
     qrX = textWidth + 16;
-    // Centered horizontally within the label column (not edge-aligned).
-    textX = textWidth / 2;
+    textX = xForAlign(0, textWidth);
     textY = qrSize / 2 + fontSize / 3;
-    textAnchor = "middle";
   } else if (pos === "right") {
     outerW = qrSize + textWidth + 16;
-    // Centered horizontally within the right column.
-    textX = qrSize + 16 + textWidth / 2;
+    textX = xForAlign(qrSize + 16, qrSize + 16 + textWidth);
     textY = qrSize / 2 + fontSize / 3;
-    textAnchor = "middle";
   }
 
   // Frame padding
@@ -494,7 +554,12 @@ function wrapWithLabelAndFrame(qrSvg: string, qrSize: number, bg: string, fg: st
   // renderFrameSvg so preview (CSS) and download (SVG) match exactly.
   const bgRect = `<rect width="${outerW}" height="${outerH}" fill="${bg}"/>`;
   const frameSvg = framed
-    ? renderFrameSvg(frameStyle, { width: outerW, height: outerH, color: frameColor, bg, inset: 6, strokeWidth: 1.6, labelPosition: pos })
+    ? renderFrameSvg(frameStyle, {
+        width: outerW, height: outerH,
+        color: frameColor,
+        bandColor: label.bandColor,
+        bg, inset: 6, strokeWidth: 1.6, labelPosition: pos,
+      })
     : "";
   const frameInner = framed ? frameSvg.replace(/^<svg[^>]*>/, "").replace(/<\/svg>$/, "") : "";
 

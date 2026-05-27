@@ -19,19 +19,46 @@ export const CreateQrSchema = z.object({
     bg: z.string().regex(/^#[0-9a-fA-F]{6}$/).optional(),
     withLogo: z.boolean().optional(),
     logoAssetId: z.string().nullable().optional(),
+    /** Logo size as fraction of QR (0.10 – 0.30). */
+    logoSize: z.number().min(0.05).max(0.4).optional(),
+    /** Quiet zone in modules (0 – 8). */
+    margin: z.number().int().min(0).max(8).optional(),
+    /** Color of the 3 finder squares. */
+    cornerColor: z.string().regex(/^#[0-9a-fA-F]{6}$/).optional(),
+    /** Linear gradient for the modules. */
+    gradient: z.object({
+      from:  z.string().regex(/^#[0-9a-fA-F]{6}$/),
+      to:    z.string().regex(/^#[0-9a-fA-F]{6}$/),
+      angle: z.number().min(0).max(360).optional(),
+    }).nullable().optional(),
   }).default({}),
   label: z.object({
     text: z.string().max(20).optional(),
     position: z.enum(["none", "top", "bottom", "left", "right"]).optional(),
-    tone: z.enum(["default", "brand", "mono", "muted"]).optional(),
     frame: z.enum(["none", "outline", "double", "sharp", "notched", "cut", "brackets", "ticket", "scallop", "polaroid", "banner", "header"]).optional(),
     font: z.string().max(40).optional(),
+    /** Rich-text formatting: size (px), bold/italic/underline, alignment. */
+    size: z.number().int().min(8).max(48).optional(),
+    bold: z.boolean().optional(),
+    italic: z.boolean().optional(),
+    underline: z.boolean().optional(),
+    align: z.enum(["left", "center", "right"]).optional(),
+    /** Text color inside the frame's text zone (polaroid/banner/ticket/header). */
+    labelColor: z.string().regex(/^#[0-9a-fA-F]{6}$/).optional(),
+    /** Background fill of the frame's text zone band. */
+    bandColor: z.string().regex(/^#[0-9a-fA-F]{6}$/).optional(),
     /** Legacy boolean — accepted for backward compatibility (true → "outline"). */
     framed: z.boolean().optional(),
   }).default({}),
   utmCampaign: z.string().max(200).optional().nullable(),
   utmSource: z.string().max(200).optional().nullable(),
   utmMedium: z.string().max(200).optional().nullable(),
+  utmTerm:   z.string().max(200).optional().nullable(),
+  /** Optional activation / expiration timestamps (ISO 8601). */
+  activatesAt: z.string().datetime().optional().nullable(),
+  expiresAt:   z.string().datetime().optional().nullable(),
+  /** Optional 1:1 Campaign link (cuid). */
+  campaignId: z.string().optional().nullable(),
   activate: z.boolean().optional().default(true),
 });
 
@@ -58,8 +85,12 @@ export async function createQr(shop: ShopWithPlan, input: CreateQrInput): Promis
           design: { ...DEFAULT_DESIGN, ...parsed.design },
           label: { ...DEFAULT_LABEL, ...parsed.label },
           utmCampaign: parsed.utmCampaign ?? null,
-          utmSource: parsed.utmSource ?? null,
-          utmMedium: parsed.utmMedium ?? null,
+          utmSource:   parsed.utmSource   ?? null,
+          utmMedium:   parsed.utmMedium   ?? null,
+          utmTerm:     parsed.utmTerm     ?? null,
+          activatesAt: parsed.activatesAt ? new Date(parsed.activatesAt) : null,
+          expiresAt:   parsed.expiresAt   ? new Date(parsed.expiresAt)   : null,
+          campaignId:  parsed.campaignId  ?? null,
           active: !!parsed.activate,
         },
       });
@@ -212,6 +243,8 @@ export async function listQrCodes(shopId: string, filters: QrListFilters = {}): 
 export async function getQrBySlug(slug: string) {
   return prisma.qrCode.findUnique({
     where: { slug },
-    include: { shop: true },
+    // Eagerly include the linked campaign so the scan endpoint can redirect
+    // straight to the campaign landing page when set.
+    include: { shop: true, campaign: true },
   });
 }

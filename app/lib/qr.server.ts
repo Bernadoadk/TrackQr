@@ -9,27 +9,58 @@ export interface QrDesign {
   bg?: string;
   withLogo?: boolean;
   logoAssetId?: string | null;
+  /** Logo size as fraction of QR (e.g. 0.20 = 20%). Default 0.20. */
+  logoSize?: number;
+  /** Quiet zone in modules around the QR. Default 2. */
+  margin?: number;
+  /** Color of the 3 finder squares — defaults to fg. */
+  cornerColor?: string;
+  /** Linear gradient for the modules (overrides fg when set). */
+  gradient?: {
+    from: string;
+    to:   string;
+    angle?: number; // 0-360 degrees, default 45
+  } | null;
 }
 
 export interface QrLabel {
   text?: string;
   position?: "none" | "top" | "bottom" | "left" | "right";
-  tone?: "default" | "brand" | "mono" | "muted";
   framed?: boolean;
+  /** Frame style (e.g. "polaroid", "header") — extends legacy `framed`. */
+  frame?: string;
+  /** Font id for the label. */
+  font?: string;
+  /** Rich-text formatting. */
+  size?: number;
+  bold?: boolean;
+  italic?: boolean;
+  underline?: boolean;
+  align?: "left" | "center" | "right";
+  /** Explicit text color inside the frame's text zone. */
+  labelColor?: string;
+  /** Explicit background fill of the frame's text zone band. */
+  bandColor?: string;
 }
 
-export const DEFAULT_DESIGN: Required<Omit<QrDesign, "logoAssetId">> = {
+export const DEFAULT_DESIGN: Required<Omit<QrDesign,
+  "logoAssetId" | "gradient">> = {
   style: "rounded",
   cornerStyle: "rounded",
   fg: "#0B1220",
   bg: "#FFFFFF",
   withLogo: false,
+  logoSize: 0.20,
+  margin: 2,
+  cornerColor: "#0B1220",
 };
 
-export const DEFAULT_LABEL: Required<Omit<QrLabel, "text">> = {
+export const DEFAULT_LABEL: Required<Omit<QrLabel,
+  "text" | "labelColor" | "bandColor" | "size" | "bold" | "italic" | "underline" | "align">> = {
   position: "bottom",
-  tone: "default",
   framed: false,
+  frame: "none",
+  font: "",
 };
 
 /**

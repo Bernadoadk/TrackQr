@@ -54,6 +54,7 @@ model Shop {
 
   subscriptions  Subscription[] @relation("ShopSubscriptions")
   qrCodes        QrCode[]
+  qrTemplates    QrTemplate[]
   campaigns      Campaign[]
   integrations   Integration[]
   assets         Asset[]
@@ -162,9 +163,13 @@ model QrCode {
   label         Json     @default("{}")
   // UTM tracking
   utmCampaign   String?
-  utmSource    String?
-  utmMedium    String?
+  utmSource     String?
+  utmMedium     String?
+  utmTerm       String?
   active        Boolean  @default(true)
+  // Scheduled activation / auto-expiration (nullable = always-on once active).
+  activatesAt   DateTime?
+  expiresAt     DateTime?
   archivedAt    DateTime?
   // If this QR is bound to a campaign (1:1 optional)
   campaignId    String?  @unique
@@ -176,6 +181,23 @@ model QrCode {
 
   @@index([shopId, createdAt])
   @@index([shopId, active])
+}
+
+/* ─────────────────────────────────────────────────────────
+   QrTemplate — saved presets (design + label snapshots) per shop
+   ───────────────────────────────────────────────────────── */
+model QrTemplate {
+  id          String   @id @default(cuid())
+  shopId      String
+  shop        Shop     @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  name        String
+  // Snapshot of the design JSON + label JSON the merchant configured.
+  design      Json     @default("{}")
+  label       Json     @default("{}")
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([shopId, updatedAt])
 }
 
 /* ─────────────────────────────────────────────────────────

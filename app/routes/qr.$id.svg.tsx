@@ -33,13 +33,25 @@ export const loader = async ({ params, request }: LoaderFunctionArgs) => {
     cornerStyle: (design.cornerStyle as "square" | "rounded" | "extra-rounded") ?? "rounded",
     withLogo: !!design.withLogo,
     logoDataUrl,
+    // Advanced design fields (Batch A / B).
+    logoSize:    (design.logoSize    as number | undefined),
+    margin:      (design.margin      as number | undefined),
+    cornerColor: (design.cornerColor as string | undefined),
+    gradient:    (design.gradient    as { from: string; to: string; angle?: number } | null | undefined) ?? null,
     label: includeLabel ? {
-      text:     labelData.text     as string | undefined,
-      position: labelData.position as QrLabelOpts["position"],
-      tone:     labelData.tone     as QrLabelOpts["tone"],
-      font:     labelData.font     as string | undefined,
+      text:       labelData.text       as string | undefined,
+      position:   labelData.position   as QrLabelOpts["position"],
+      font:       labelData.font       as string | undefined,
       // Accept the new `frame` value, with fallback to legacy boolean `framed`.
-      frame:    (labelData.frame as QrLabelOpts["frame"]) ?? ((labelData.framed as boolean | undefined) ? "outline" : "none"),
+      frame:      (labelData.frame as QrLabelOpts["frame"]) ?? ((labelData.framed as boolean | undefined) ? "outline" : "none"),
+      // Rich-text formatting from the inline toolbar.
+      size:       labelData.size       as number | undefined,
+      bold:       labelData.bold       as boolean | undefined,
+      italic:     labelData.italic     as boolean | undefined,
+      underline:  labelData.underline  as boolean | undefined,
+      align:      labelData.align      as "left" | "center" | "right" | undefined,
+      labelColor: labelData.labelColor as string | undefined,
+      bandColor:  labelData.bandColor  as string | undefined,
     } : undefined,
   });
 

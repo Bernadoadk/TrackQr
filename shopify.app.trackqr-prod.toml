@@ -7,7 +7,6 @@ embedded = true
 
 [build]
 automatically_update_urls_on_dev = true
-include_config_on_deploy = true
 
 [webhooks]
 api_version = "2026-07"
@@ -51,7 +50,7 @@ api_version = "2026-07"
 scopes = "write_products,read_products,write_discounts,read_discounts,read_orders,write_metaobjects,write_metaobject_definitions"
 
 [auth]
-redirect_urls = [ "https://track-qr-green.vercel.app/api/auth" ]
+redirect_urls = [ "https://track-qr-green.vercel.app/auth/callback" ]
 
 [product.metafields.app.demo_info]
 type = "single_line_text_field"

@@ -1,5 +1,5 @@
 {
-  "buildCommand": "npx prisma generate && npx prisma migrate deploy && npx react-router build",
+  "buildCommand": "rm -f .vercel/react-router-build-result.json && npx prisma generate && npx prisma migrate deploy && npx react-router build",
   "installCommand": "npm install",
   "framework": "react-router",
   "outputDirectory": "build"

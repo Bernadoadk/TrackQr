@@ -1,80 +1,81 @@
 import prisma from "../db.server";
 import { z } from "zod";
-import type { Campaign, IntegrationProvider, Lead } from "@prisma/client";
-import { decryptSecret } from "./crypto.server";
-import { klaviyoSubscribe } from "./integrations/klaviyo";
-import { mailchimpSubscribe } from "./integrations/mailchimp";
-import { hubspotSubscribe } from "./integrations/hubspot";
+import type { Campaign, Lead } from "@prisma/client";
+import { leadNotificationHtml, sendSmtpMail } from "./smtp.server";
 
 const EmailSchema = z.string().email().max(320);
-
-const PROVIDER_BY_DESTINATION: Record<string, IntegrationProvider | null> = {
-  klaviyo:   "KLAVIYO",
-  mailchimp: "MAILCHIMP",
-  hubspot:   "HUBSPOT",
-  db:        null,
-  csv:       null,
-};
+const OptionalEmailSchema = z.string().email().max(320).optional();
 
 export interface CaptureLeadInput {
-  campaign: Campaign;
+  campaign: Campaign & { shop?: { domain?: string | null; email?: string | null } };
   shopId: string;
   email: string;
-  destination: string;
+  recipientEmail?: string | null;
+  mailSubject?: string | null;
   extra: Record<string, string>;
   sourceIp: string | null;
   sourceUa: string | null;
 }
 
 /**
- * Capture a lead — always persists to our DB; optionally forwards to the
- * configured external provider. Integration errors do NOT lose the lead.
+ * Capture a lead — always persists to our DB, then notifies the merchant via SMTP.
+ * SMTP errors do NOT lose the lead.
  */
 export async function captureLead(input: CaptureLeadInput): Promise<Lead> {
   const email = EmailSchema.parse(input.email);
-  const provider = PROVIDER_BY_DESTINATION[input.destination] ?? null;
+  const recipientEmail = OptionalEmailSchema.safeParse(
+    (input.recipientEmail || input.campaign.shop?.email || "").trim() || undefined,
+  );
 
-  // Always write to DB first.
   const lead = await prisma.lead.create({
     data: {
       campaignId: input.campaign.id,
       email,
       fields: input.extra,
       source: input.sourceIp ? `${input.sourceIp.slice(0, 24)} · ${(input.sourceUa ?? "").slice(0, 80)}` : null,
-      destination: input.destination,
-      syncStatus: provider ? "PENDING" : "DB_ONLY",
+      destination: "smtp",
+      syncStatus: "PENDING",
     },
   });
 
-  if (!provider) return lead;
-
-  // Lookup the integration secrets — silently skip if not configured.
-  const integration = await prisma.integration.findUnique({
-    where: { shopId_provider: { shopId: input.shopId, provider } },
-  });
-  if (!integration || !integration.active) {
-    await prisma.lead.update({
+  if (!recipientEmail.success || !recipientEmail.data) {
+    return prisma.lead.update({
       where: { id: lead.id },
-      data: { syncStatus: "FAILED", syncError: `${provider} not configured` },
+      data: { syncStatus: "FAILED", syncError: "Recipient email is missing or invalid" },
     });
-    return lead;
   }
 
   try {
-    const token = decryptSecret(integration.encryptedToken);
-    const listId = integration.listId ?? "";
-    if (provider === "KLAVIYO")   await klaviyoSubscribe({ apiKey: token, listId, email, properties: input.extra });
-    if (provider === "MAILCHIMP") await mailchimpSubscribe({ apiKey: token, listId, email, fields: input.extra });
-    if (provider === "HUBSPOT")   await hubspotSubscribe({ apiKey: token, email, properties: input.extra });
-    await prisma.lead.update({ where: { id: lead.id }, data: { syncStatus: "SYNCED" } });
+    const subject = input.mailSubject?.trim() || `New lead from ${input.campaign.name}`;
+    const text = [
+      `Campaign: ${input.campaign.name}`,
+      input.campaign.shop?.domain ? `Shop: ${input.campaign.shop.domain}` : "",
+      `Customer email: ${email}`,
+      "",
+      ...Object.entries(input.extra)
+        .filter(([key]) => key !== "blockId")
+        .map(([key, value]) => `${key}: ${value}`),
+    ].filter(Boolean).join("\n");
+
+    await sendSmtpMail({
+      to: recipientEmail.data,
+      subject,
+      text,
+      html: leadNotificationHtml({
+        campaignName: input.campaign.name,
+        customerEmail: email,
+        fields: input.extra,
+        shopDomain: input.campaign.shop?.domain,
+      }),
+      replyTo: email,
+    });
+    return prisma.lead.update({ where: { id: lead.id }, data: { syncStatus: "SYNCED" } });
   } catch (err) {
-    await prisma.lead.update({
+    return prisma.lead.update({
       where: { id: lead.id },
       data: { syncStatus: "FAILED", syncError: err instanceof Error ? err.message.slice(0, 500) : "Unknown error" },
     });
   }
-
-  return lead;
 }
 
 export async function listLeads(campaignId: string) {

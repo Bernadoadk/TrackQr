@@ -1,4 +1,5 @@
 import prisma from "../db.server";
+import crypto from "node:crypto";
 
 interface AdminGraphqlClient {
   graphql: (query: string, options?: { variables?: Record<string, unknown> }) => Promise<{ json: <T>() => Promise<T> }>;
@@ -19,12 +20,101 @@ interface StagedUploadCreatePayload {
 
 export interface UploadedLogo {
   assetId: string;       // local Asset.id
-  shopifyFileId: string; // gid://shopify/MediaImage/…
+  shopifyFileId: string; // legacy field; stores Shopify gid or Cloudinary public_id
   url: string;
   mimeType: string;
   byteSize: number;
   width?: number;
   height?: number;
+}
+
+interface CloudinaryUploadResponse {
+  public_id: string;
+  secure_url: string;
+  resource_type: string;
+  format?: string;
+  bytes?: number;
+  width?: number;
+  height?: number;
+}
+
+function cloudinaryConfig() {
+  const cloudName = process.env.CLOUDINARY_CLOUD_NAME?.trim();
+  const apiKey = process.env.CLOUDINARY_API_KEY?.trim();
+  const apiSecret = process.env.CLOUDINARY_API_SECRET?.trim();
+  const uploadPreset = process.env.CLOUDINARY_UPLOAD_PRESET?.trim();
+  const folder = process.env.CLOUDINARY_UPLOAD_FOLDER?.trim() || "trackqr/campaigns";
+  if (!cloudName) return null;
+  return { cloudName, apiKey, apiSecret, uploadPreset, folder };
+}
+
+function cloudinarySignature(params: Record<string, string>, apiSecret: string) {
+  const payload = Object.entries(params)
+    .filter(([, value]) => value !== "")
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([key, value]) => `${key}=${value}`)
+    .join("&");
+  return crypto.createHash("sha1").update(`${payload}${apiSecret}`).digest("hex");
+}
+
+export async function uploadImageToCloudinary(opts: {
+  shopId: string;
+  file: { name: string; mimeType: string; size: number; bytes: Buffer | ArrayBuffer };
+}): Promise<UploadedLogo> {
+  const config = cloudinaryConfig();
+  if (!config) throw new Error("Cloudinary is not configured");
+  if (!config.uploadPreset && (!config.apiKey || !config.apiSecret)) {
+    throw new Error("Cloudinary needs either CLOUDINARY_UPLOAD_PRESET or CLOUDINARY_API_KEY/CLOUDINARY_API_SECRET");
+  }
+
+  const bytes = opts.file.bytes instanceof Buffer ? new Uint8Array(opts.file.bytes) : new Uint8Array(opts.file.bytes);
+  const blob = new Blob([bytes], { type: opts.file.mimeType });
+  const form = new FormData();
+  form.append("file", blob, opts.file.name);
+  form.append("folder", config.folder);
+
+  if (config.apiKey && config.apiSecret) {
+    const timestamp = String(Math.floor(Date.now() / 1000));
+    const signedParams: Record<string, string> = { folder: config.folder, timestamp };
+    if (config.uploadPreset) signedParams.upload_preset = config.uploadPreset;
+    form.append("api_key", config.apiKey);
+    form.append("timestamp", timestamp);
+    if (config.uploadPreset) form.append("upload_preset", config.uploadPreset);
+    form.append("signature", cloudinarySignature(signedParams, config.apiSecret));
+  } else if (config.uploadPreset) {
+    form.append("upload_preset", config.uploadPreset);
+  }
+
+  const res = await fetch(`https://api.cloudinary.com/v1_1/${config.cloudName}/image/upload`, {
+    method: "POST",
+    body: form,
+  });
+  const json = await res.json() as CloudinaryUploadResponse & { error?: { message?: string } };
+  if (!res.ok || !json.secure_url) {
+    throw new Error(json.error?.message || `Cloudinary upload failed: ${res.status}`);
+  }
+
+  const asset = await prisma.asset.create({
+    data: {
+      shopId: opts.shopId,
+      shopifyFileId: json.public_id,
+      url: json.secure_url,
+      mimeType: opts.file.mimeType,
+      byteSize: json.bytes ?? opts.file.size,
+      width: typeof json.width === "number" ? json.width : null,
+      height: typeof json.height === "number" ? json.height : null,
+    },
+  });
+
+  return {
+    assetId: asset.id,
+    shopifyFileId: json.public_id,
+    url: asset.url,
+    mimeType: asset.mimeType ?? opts.file.mimeType,
+    byteSize: asset.byteSize ?? opts.file.size,
+    width: asset.width ?? undefined,
+    height: asset.height ?? undefined,
+  };
 }
 
 /**

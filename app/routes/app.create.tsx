@@ -1,15 +1,16 @@
 import type { HeadersFunction, LoaderFunctionArgs, ActionFunctionArgs } from "react-router";
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useNavigate, useFetcher, useLoaderData } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { useAppBridge } from "@shopify/app-bridge-react";
 import { authenticate } from "../shopify.server";
 import { requireShop } from "../lib/shop.server";
-import { createQr } from "../lib/qr-crud.server";
+import { createQr, getQrForEdit, updateQr } from "../lib/qr-crud.server";
 import { listTemplates, createTemplate, deleteTemplate } from "../lib/templates.server";
 import { listCampaigns } from "../lib/campaign.server";
 import { createDiscountCode } from "../lib/discounts.server";
 import { QuotaExceededError } from "../lib/plan.server";
+import { QR_TYPE_TO_UI } from "../lib/qr-types";
 import { Icon } from "../components/ui/Icon";
 import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
@@ -17,18 +18,23 @@ import { Card } from "../components/ui/Card";
 import { Field, Input, Textarea } from "../components/ui/Input";
 import { Segmented } from "../components/ui/Segmented";
 import { useToast } from "../components/ui/Toast";
-import { renderQrSvg as renderQrSvgClient, renderFrameSvg, framesForPosition, frameInvertsLabel, FRAME_LABEL, FRAMES_WITH_LABEL_ZONE, type FrameStyle } from "../lib/qr-render";
+import { renderQrSvg as renderQrSvgClient, renderFrameSvg, framesForPosition, frameInvertsLabel, FRAME_LABEL, FRAMES_WITH_LABEL_ZONE, type FrameStyle, type QrLabelOpts } from "../lib/qr-render";
 import { LogoPicker, logoSvgDataUrl, type LogoSelection } from "../components/ui/LogoPicker";
 import { LABEL_FONTS, LABEL_FONT_GROUPS, DEFAULT_FONT, getLabelFont } from "../lib/label-fonts";
 import { contrastRatio, contrastVerdict } from "../lib/contrast";
+import { downloadQrAsset, type DownloadFormat } from "../lib/qr-download";
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   await authenticate.admin(request);
   const { shop } = await requireShop(request);
+  const url = new URL(request.url);
+  const editId = url.searchParams.get("edit");
+  const origin = (process.env.SHOPIFY_APP_URL ?? url.origin).replace(/\/$/, "");
   // Load templates + active campaigns once for the page (cheap queries).
-  const [templates, campaigns] = await Promise.all([
+  const [templates, campaigns, editQr] = await Promise.all([
     listTemplates(shop.id),
     listCampaigns(shop.id),
+    editId ? getQrForEdit(shop.id, editId) : Promise.resolve(null),
   ]);
   return {
     templates: templates.map(t => ({
@@ -39,6 +45,26 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       updatedAt: t.updatedAt.toISOString(),
     })),
     campaigns: campaigns.map(c => ({ id: c.id, name: c.name, slug: c.slug, status: c.status })),
+    origin,
+    editQr: editQr ? {
+      id: editQr.id,
+      slug: editQr.slug,
+      name: editQr.name,
+      description: editQr.description,
+      type: QR_TYPE_TO_UI[editQr.type],
+      target: editQr.target,
+      shopifyRef: editQr.shopifyRef,
+      design: editQr.design as Record<string, unknown>,
+      label: editQr.label as Record<string, unknown>,
+      utmCampaign: editQr.utmCampaign,
+      utmSource: editQr.utmSource,
+      utmMedium: editQr.utmMedium,
+      utmTerm: editQr.utmTerm,
+      activatesAt: editQr.activatesAt?.toISOString() ?? null,
+      expiresAt: editQr.expiresAt?.toISOString() ?? null,
+      campaignId: editQr.campaignId,
+      active: editQr.active,
+    } : null,
   };
 };
 
@@ -68,7 +94,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     return { ok: true as const, intent: "template:delete" as const };
   }
 
-  // ── Default: create QR ───────────────────────────────
+  // ── Default: create/update QR ─────────────────────────
   try {
     const design = JSON.parse(String(form.get("design") ?? "{}"));
     const label = JSON.parse(String(form.get("label") ?? "{}"));
@@ -89,7 +115,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       if (!result.ok) discountWarning = result.error;
     }
 
-    const qr = await createQr(shop, {
+    const payload = {
       name: String(form.get("name") ?? ""),
       description: (form.get("description") as string | null) || null,
       type,
@@ -105,14 +131,20 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       expiresAt:   (form.get("expiresAt")   as string | null) || null,
       campaignId:  (form.get("campaignId")  as string | null) || null,
       activate: form.get("activate") === "1",
-    });
+    };
+
+    const editId = String(form.get("id") ?? "");
+    const qr = intent === "update" && editId
+      ? await updateQr(shop.id, editId, payload)
+      : await createQr(shop, payload);
 
     return {
       ok: true,
-      intent: "create" as const,
+      intent: intent === "update" ? "update" as const : "create" as const,
       id: qr.id,
       slug: qr.slug,
       name: qr.name,
+      active: qr.active,
       discountWarning,
     } as const;
   } catch (err) {
@@ -169,6 +201,7 @@ function QrSvg({
   margin = 8,
   cornerColor,
   gradient,
+  label,
 }: {
   text: string; size?: number; fg: string; bg: string;
   style: QrStyle; cornerStyle: CornerStyle;
@@ -177,6 +210,7 @@ function QrSvg({
   margin?: number;
   cornerColor?: string;
   gradient?: { from: string; to: string; angle?: number } | null;
+  label?: QrLabelOpts;
 }) {
   const ref = useRef<HTMLDivElement>(null);
 
@@ -185,34 +219,61 @@ function QrSvg({
     logo.kind === "brand"  && logo.brandId   ? logoSvgDataUrl(logo.brandId, 80) :
     logo.kind === "custom" && logo.customUrl ? logo.customUrl :
     "";
+  const logoKind = logo.kind;
+  const gradientFrom = gradient?.from;
+  const gradientTo = gradient?.to;
+  const gradientAngle = gradient?.angle;
+  const labelText = label?.text;
+  const labelPosition = label?.position;
+  const labelFrame = label?.frame;
+  const labelFrameColor = label?.frameColor;
+  const labelColor = label?.labelColor;
+  const labelBandColor = label?.bandColor;
+  const labelFont = label?.font;
+  const labelSize = label?.size;
+  const labelBold = label?.bold;
+  const labelItalic = label?.italic;
+  const labelUnderline = label?.underline;
+  const labelAlign = label?.align;
+  const hasLabel = !!label;
 
   useEffect(() => {
     if (!ref.current) return;
     try {
-      let svg = renderQrSvgClient(text || "TrackQr placeholder", {
-        size, fg, bg, style, cornerStyle, withLogo: logo.kind !== "none",
+      const svg = renderQrSvgClient(text || "TrackQr placeholder", {
+        size, fg, bg, style, cornerStyle, withLogo: logoKind !== "none",
+        logoDataUrl: logoSrc || undefined,
         logoSize: logoSizeFrac,
         margin,
         cornerColor,
-        gradient,
+        gradient: gradientFrom && gradientTo ? { from: gradientFrom, to: gradientTo, angle: gradientAngle } : null,
+        label: hasLabel ? {
+          text: labelText,
+          position: labelPosition,
+          frame: labelFrame,
+          frameColor: labelFrameColor,
+          labelColor,
+          bandColor: labelBandColor,
+          font: labelFont,
+          size: labelSize,
+          bold: labelBold,
+          italic: labelItalic,
+          underline: labelUnderline,
+          align: labelAlign,
+        } : undefined,
       });
-      if (logoSrc) {
-        const ls = Math.round(size * logoSizeFrac);
-        const logoX = (size - ls) / 2;
-        const logoY = (size - ls) / 2;
-        // White rounded "punch" behind the logo so it stays readable on dark fg.
-        const pad = 4;
-        const punch = `<rect x="${logoX - pad}" y="${logoY - pad}" width="${ls + pad * 2}" height="${ls + pad * 2}" rx="8" fill="${bg}"/>`;
-        const overlay = `<image href="${logoSrc}" x="${logoX}" y="${logoY}" width="${ls}" height="${ls}" preserveAspectRatio="xMidYMid meet"/>`;
-        svg = svg.replace("</svg>", punch + overlay + "</svg>");
-      }
       ref.current.innerHTML = svg;
     } catch (err) {
       console.error("[qr-preview] render failed", err);
     }
-  }, [text, size, fg, bg, style, cornerStyle, logoSrc, logoSizeFrac, margin, cornerColor, gradient?.from, gradient?.to, gradient?.angle]);
+  }, [
+    text, size, fg, bg, style, cornerStyle, logoKind, logoSrc, logoSizeFrac, margin, cornerColor,
+    gradientFrom, gradientTo, gradientAngle,
+    hasLabel, labelText, labelPosition, labelFrame, labelFrameColor, labelColor, labelBandColor,
+    labelFont, labelSize, labelBold, labelItalic, labelUnderline, labelAlign,
+  ]);
 
-  return <div ref={ref} style={{ width: "100%", height: "100%", display: "grid", placeItems: "center" }} />;
+  return <div ref={ref} style={{ display: "grid", placeItems: "center", lineHeight: 0 }} />;
 }
 
 /* ── StyleIllus — static mini pattern illustration (no CDN needed) ── */
@@ -326,6 +387,43 @@ function vcardPayload(o: { fullName: string; title?: string; org?: string; phone
   return lines.filter(Boolean).join("\n");
 }
 
+function parseWifiPayload(payload: string) {
+  const parts: Record<string, string> = {};
+  payload.replace(/^WIFI:/, "").split(";").forEach(part => {
+    const [key, ...value] = part.split(":");
+    if (key) parts[key] = value.join(":").replace(/\\([\\;,"':])/g, "$1");
+  });
+  return {
+    ssid: parts.S ?? "",
+    password: parts.P ?? "",
+    encryption: (parts.T === "WEP" || parts.T === "nopass" ? parts.T : "WPA") as "WPA" | "WEP" | "nopass",
+  };
+}
+
+function parseVcardPayload(payload: string) {
+  const lines = payload.split(/\r?\n/);
+  const get = (key: string) => {
+    const line = lines.find(l => l.toUpperCase().startsWith(`${key.toUpperCase()}:`) || l.toUpperCase().startsWith(`${key.toUpperCase()};`));
+    return line ? line.substring(line.indexOf(":") + 1) : "";
+  };
+  return {
+    fullName: get("FN"),
+    title: get("TITLE"),
+    org: get("ORG"),
+    phone: get("TEL"),
+    email: get("EMAIL"),
+    url: get("URL"),
+  };
+}
+
+function toDatetimeLocal(iso?: string | null) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  const local = new Date(d.getTime() - d.getTimezoneOffset() * 60000);
+  return local.toISOString().slice(0, 16);
+}
+
 export default function CreateQr() {
   const navigate = useNavigate();
   const toast    = useToast();
@@ -333,7 +431,8 @@ export default function CreateQr() {
   const templateFetcher = useFetcher<typeof action>();
   const shopify  = useAppBridge();
   // Loader data — saved templates + active campaigns to attach to.
-  const { templates, campaigns } = useLoaderData<typeof loader>();
+  const { templates, campaigns, editQr, origin } = useLoaderData<typeof loader>();
+  const isEditing = !!editQr;
 
   const [name,        setName]        = useState("");
   const [description, setDescription] = useState("");
@@ -386,6 +485,7 @@ export default function CreateQr() {
   const [utmTerm,     setUtmTerm]     = useState<string>("");
 
   // Schedule (Batch C) — optional ISO timestamps for activation/expiration.
+  const [scheduleEnabled, setScheduleEnabled] = useState<boolean>(false);
   const [activatesAt, setActivatesAt] = useState<string>("");
   const [expiresAt,   setExpiresAt]   = useState<string>("");
 
@@ -438,52 +538,96 @@ export default function CreateQr() {
   const [activated,    setActivated]    = useState(false);
   const [generating,   setGenerating]   = useState(false);
   const [renderToken,  setRenderToken]  = useState(0);
+  const [downloading,  setDownloading]  = useState<DownloadFormat | null>(null);
+  const [savedQr,      setSavedQr]      = useState<{ id: string; slug: string; name: string } | null>(
+    editQr ? { id: editQr.id, slug: editQr.slug, name: editQr.name } : null,
+  );
+  const [submitMode, setSubmitMode] = useState<"save" | "saveExit" | "activate" | null>(null);
 
-  // Measure the actual rendered size of the qr-stage and the label so we can
-  // render the frame SVG at matching dimensions in real time.
-  //
-  // We use a CALLBACK ref pattern for the label (rather than useRef) so the
-  // ResizeObserver is re-attached every time the label element appears /
-  // disappears in the DOM (eg. when the user starts typing a QR name and the
-  // label conditional toggles to true). With a plain useRef, the observer
-  // would attach once at mount when the element was still null.
-  const stageRef = useRef<HTMLDivElement>(null);
-  const [stageSize, setStageSize] = useState({ w: 0, h: 0 });
-  const [labelSize, setLabelSize] = useState({ w: 0, h: 0 });
-
+  const editHydrated = useRef(false);
   useEffect(() => {
-    if (!stageRef.current || typeof ResizeObserver === "undefined") return;
-    const ro = new ResizeObserver(entries => {
-      const r = entries[0]?.contentRect;
-      if (!r) return;
-      const w = Math.round(r.width), h = Math.round(r.height);
-      setStageSize(prev => (prev.w === w && prev.h === h ? prev : { w, h }));
-    });
-    ro.observe(stageRef.current);
-    return () => ro.disconnect();
-  }, []);
+    if (!editQr || editHydrated.current) return;
+    editHydrated.current = true;
 
-  // Callback ref — MEMOIZED with useCallback so React sees the same reference
-  // across renders and only calls it when the DOM element actually changes
-  // (attach / detach). Without the memo, every render produces a new function,
-  // React detach→attach the ref, which re-fires the observer and re-renders,
-  // creating an infinite loop ("Maximum update depth exceeded").
-  const labelObsRef = useRef<ResizeObserver | null>(null);
-  const labelRefCb = useCallback((el: HTMLDivElement | null) => {
-    if (labelObsRef.current) {
-      labelObsRef.current.disconnect();
-      labelObsRef.current = null;
+    const d = editQr.design as Record<string, unknown>;
+    const l = editQr.label as Record<string, unknown>;
+    const editType = (editQr.type || "product") as QrTypeId;
+
+    setName(editQr.name ?? "");
+    setDescription(editQr.description ?? "");
+    setType(editType);
+    setShopifyRef(editQr.shopifyRef ?? null);
+    setSelectedLabel("");
+
+    if (editType === "wifi") {
+      const wifi = parseWifiPayload(editQr.target ?? "");
+      setWifiSsid(wifi.ssid);
+      setWifiPwd(wifi.password);
+      setWifiEnc(wifi.encryption);
+      setTarget("");
+    } else if (editType === "vcard") {
+      const vcard = parseVcardPayload(editQr.target ?? "");
+      setVcFull(vcard.fullName);
+      setVcTitle(vcard.title);
+      setVcOrg(vcard.org);
+      setVcPhone(vcard.phone);
+      setVcEmail(vcard.email);
+      setVcUrl(vcard.url);
+      setTarget("");
+    } else {
+      setTarget(editQr.target ?? "");
     }
-    if (!el || typeof ResizeObserver === "undefined") return;
-    const ro = new ResizeObserver(entries => {
-      const r = entries[0]?.contentRect;
-      if (!r) return;
-      const w = Math.round(r.width), h = Math.round(r.height);
-      setLabelSize(prev => (prev.w === w && prev.h === h ? prev : { w, h }));
-    });
-    ro.observe(el);
-    labelObsRef.current = ro;
-  }, []);
+
+    if (QR_STYLES.includes(d.style as QrStyle)) setStyle(d.style as QrStyle);
+    if (QR_CORNERS.includes(d.cornerStyle as CornerStyle)) setCornerStyle(d.cornerStyle as CornerStyle);
+    if (typeof d.fg === "string") setFg(d.fg);
+    if (typeof d.bg === "string") setBg(d.bg);
+    if (typeof d.cornerColor === "string") {
+      cornerCustomized.current = true;
+      setCornerColor(d.cornerColor);
+    }
+    if (typeof d.logoSize === "number") setLogoSizePct(Math.round(d.logoSize * 100));
+    if (typeof d.margin === "number") setQrMargin(d.margin);
+    if (d.logoBrand && typeof d.logoBrand === "string") {
+      setLogoSel({ kind: "brand", brandId: d.logoBrand });
+    } else if (d.logoUrl && typeof d.logoUrl === "string") {
+      setLogoSel({ kind: "custom", customUrl: d.logoUrl, customAssetId: typeof d.logoAssetId === "string" ? d.logoAssetId : undefined });
+    } else {
+      setLogoSel({ kind: "none" });
+    }
+    const gradient = d.gradient as { from?: unknown; to?: unknown; angle?: unknown } | null | undefined;
+    if (gradient && typeof gradient.from === "string" && typeof gradient.to === "string") {
+      setGradientOn(true);
+      setGradientFrom(gradient.from);
+      setGradientTo(gradient.to);
+      setGradientAngle(typeof gradient.angle === "number" ? gradient.angle : 45);
+    } else {
+      setGradientOn(false);
+    }
+
+    setLabelText(typeof l.text === "string" ? l.text : "");
+    if (LABEL_POSITIONS.includes(l.position as LabelPos)) setLabelPos(l.position as LabelPos);
+    if (framesForPosition(l.position as LabelPos).includes(l.frame as FrameStyle)) setFrameStyle(l.frame as FrameStyle);
+    if (typeof l.font === "string" && l.font) setLabelFont(l.font);
+    if (typeof l.size === "number") setLabelFontSize(l.size);
+    setLabelBold(!!l.bold);
+    setLabelItalic(!!l.italic);
+    setLabelUnderline(!!l.underline);
+    if (l.align === "left" || l.align === "center" || l.align === "right") setLabelAlign(l.align);
+    if (typeof l.labelColor === "string") setLabelTextColor(l.labelColor);
+    if (typeof l.bandColor === "string") setLabelBgColor(l.bandColor);
+
+    setUtmCampaign(editQr.utmCampaign ?? "");
+    setUtmSource(editQr.utmSource ?? "");
+    setUtmMedium(editQr.utmMedium ?? "qr");
+    setUtmTerm(editQr.utmTerm ?? "");
+    setScheduleEnabled(!!(editQr.activatesAt || editQr.expiresAt));
+    setActivatesAt(toDatetimeLocal(editQr.activatesAt));
+    setExpiresAt(toDatetimeLocal(editQr.expiresAt));
+    setCampaignId(editQr.campaignId ?? "");
+    setActivated(editQr.active);
+    setSavedQr({ id: editQr.id, slug: editQr.slug, name: editQr.name });
+  }, [editQr]);
 
   // Compose the effective target whenever sub-fields change.
   const effectiveTarget = (() => {
@@ -496,15 +640,26 @@ export default function CreateQr() {
     setGenerating(true);
     const t = setTimeout(() => { setGenerating(false); setRenderToken(k => k + 1); }, 380);
     return () => clearTimeout(t);
-  }, [style, cornerStyle, fg, bg, logoSel, name, type, effectiveTarget, activated]);
+  }, [
+    style, cornerStyle, fg, bg, logoSel, logoSizePct, qrMargin, cornerColor,
+    gradientOn, gradientFrom, gradientTo, gradientAngle,
+    labelText, labelPos, frameStyle, labelFont, labelFontSize, labelBold, labelItalic, labelUnderline,
+    labelAlign, labelTextColor, labelBgColor,
+    name, type, effectiveTarget, activated,
+  ]);
 
   useEffect(() => {
     if (fetcher.state !== "idle" || !fetcher.data) return;
-    // Only react to QR-create responses here; template intents use templateFetcher.
-    if (fetcher.data.intent && fetcher.data.intent !== "create") return;
+    // Only react to QR create/update responses here; template intents use templateFetcher.
+    if (fetcher.data.intent && fetcher.data.intent !== "create" && fetcher.data.intent !== "update") return;
     if (fetcher.data.ok) {
-      setActivated(true);
-      toast({ title: "QR code activated", desc: "Saved to My QR codes." });
+      setSavedQr({ id: fetcher.data.id, slug: fetcher.data.slug, name: fetcher.data.name || name || fetcher.data.slug });
+      setActivated(fetcher.data.active);
+      toast({
+        title: submitMode === "activate" ? "QR code activated" : "QR code saved",
+        desc: submitMode === "activate" ? "It is now ready to scan." : "Saved to My QR codes.",
+      });
+      if (submitMode === "saveExit") navigate("/app/qr-manager");
       // Surface a non-fatal warning if the Shopify discount couldn't be created.
       if ("discountWarning" in fetcher.data && fetcher.data.discountWarning) {
         toast({
@@ -520,6 +675,7 @@ export default function CreateQr() {
         desc: fetcher.data.message,
       });
     }
+    setSubmitMode(null);
   }, [fetcher.state, fetcher.data]);
 
   // Template fetcher feedback — uses a separate fetcher so it doesn't trigger
@@ -537,12 +693,35 @@ export default function CreateQr() {
 
   const submitting = fetcher.state !== "idle";
 
-  function handleActivate() {
+  function validateBeforeSave() {
     if (!valid) {
-      toast({ type: "error", title: "Add a name first", desc: "QR code name is required to activate." });
+      toast({ type: "error", title: "Add a name first", desc: "QR code name is required before saving." });
+      return false;
+    }
+    if (scheduleEnabled) {
+      if (!activatesAt || !expiresAt) {
+        toast({ type: "error", title: "Schedule incomplete", desc: "Set both activation and expiration dates." });
+        return false;
+      }
+      if (new Date(expiresAt).getTime() <= new Date(activatesAt).getTime()) {
+        toast({ type: "error", title: "Invalid schedule", desc: "Expiration must be after activation." });
+        return false;
+      }
+    }
+    return true;
+  }
+
+  function submitQr(mode: "save" | "saveExit" | "activate") {
+    if (!validateBeforeSave()) return;
+    const id = savedQr?.id ?? editQr?.id;
+    if (mode === "activate" && !id) {
+      toast({ type: "error", title: "Save first", desc: "Save this QR code before activating it." });
       return;
     }
+    const nextActive = mode === "activate" ? true : activated;
     const fd = new FormData();
+    fd.set("intent", id ? "update" : "create");
+    if (id) fd.set("id", id);
     fd.set("name", name);
     fd.set("description", description);
     fd.set("type", type);
@@ -578,15 +757,32 @@ export default function CreateQr() {
     if (utmTerm)     fd.set("utmTerm",     utmTerm);
     // Datetime-local inputs return e.g. "2026-05-23T15:30" — convert to ISO 8601
     // (with seconds + Z) so the Zod .datetime() validator accepts them.
-    if (activatesAt) fd.set("activatesAt", new Date(activatesAt).toISOString());
-    if (expiresAt)   fd.set("expiresAt",   new Date(expiresAt).toISOString());
+    if (scheduleEnabled && activatesAt) fd.set("activatesAt", new Date(activatesAt).toISOString());
+    if (scheduleEnabled && expiresAt)   fd.set("expiresAt",   new Date(expiresAt).toISOString());
     if (campaignId)  fd.set("campaignId",  campaignId);
-    if (type === "promo" && autoCreateDiscount && target) {
+    if (!id && type === "promo" && autoCreateDiscount && target) {
       fd.set("autoCreateDiscount", "1");
       fd.set("discountValuePct", String(discountValuePct / 100));
     }
-    fd.set("activate", "1");
+    fd.set("activate", nextActive ? "1" : "0");
+    setSubmitMode(mode);
     fetcher.submit(fd, { method: "post" });
+  }
+
+  async function handleDownload(format: DownloadFormat) {
+    if (!savedQr) {
+      toast({ type: "error", title: "Save first", desc: "Save this QR code before downloading it." });
+      return;
+    }
+    setDownloading(format);
+    try {
+      await downloadQrAsset({ id: savedQr.id, slug: savedQr.slug, name: name || savedQr.name || savedQr.slug }, format);
+      toast({ title: `${format.toUpperCase()} downloaded`, type: "info" });
+    } catch (err) {
+      toast({ type: "error", title: "Download failed", desc: err instanceof Error ? err.message : "Try again." });
+    } finally {
+      setDownloading(null);
+    }
   }
 
   /* Reset the entire Design card to defaults — fg/bg/style/corners + advanced. */
@@ -761,25 +957,11 @@ export default function CreateQr() {
 
   const tm = typeMeta(type);
 
-  const previewText = activated
-    ? `https://trackqr.app/s/${(name || "untitled").toLowerCase().replace(/[^a-z0-9]+/g, "-")}`
+  const previewText = savedQr?.slug
+    ? `${origin}/s/${savedQr.slug}`
     : effectiveTarget || (name ? `${name} · ${tm.name}` : "TrackQr placeholder");
 
   const labelFontSpec = getLabelFont(labelFont);
-
-  // Dynamic band size = label cell width (text + horizontal padding inside cell).
-  // Combined with `bandOffset` (the distance from the frame's inner edge to
-  // the label cell's outer edge), the band lines up EXACTLY with the label
-  // CSS-grid cell — never bleeding into the QR area, no matter how short the
-  // text is. No floor is needed thanks to the offset.
-  const dynamicBandSize = (() => {
-    if (labelPos === "left" || labelPos === "right") return labelSize.w + 24;
-    if (labelPos === "top"  || labelPos === "bottom") return labelSize.h + 16;
-    return 48;
-  })();
-  // Frame inset (8) + .qr-stage CSS padding (28) - frame inset (8) = 28-8 = 20
-  // → the band sits 20px inside the frame outline on the label side.
-  const bandOffset = labelPos === "none" ? 0 : 20;
 
   const valid = name.trim().length > 0 && (
     type === "home"  ? true :
@@ -787,16 +969,28 @@ export default function CreateQr() {
     type === "vcard" ? vcFull.length > 0 :
     effectiveTarget.length > 0
   );
-  const showLabel = !!labelText && labelPos !== "none";
+  const previewLabel: QrLabelOpts = {
+    text: labelText,
+    position: labelPos,
+    frame: frameStyle,
+    font: labelFont,
+    size: labelFontSize,
+    bold: labelBold,
+    italic: labelItalic,
+    underline: labelUnderline,
+    align: labelAlign,
+    labelColor: hasTextZone ? labelTextColor : undefined,
+    bandColor:  hasTextZone ? labelBgColor   : undefined,
+  };
 
   return (
     <>
       <div className="page-head">
         <div className="page-head-left">
-          <Button size="sm" variant="ghost" icon="chevron-left" onClick={() => navigate("/app")} style={{ marginBottom: 8, marginLeft: -10 }}>
-            Back to dashboard
+          <Button size="sm" variant="ghost" icon="chevron-left" onClick={() => navigate(isEditing ? "/app/qr-manager" : "/app")} style={{ marginBottom: 8, marginLeft: -10 }}>
+            {isEditing ? "Back to My QR codes" : "Back to dashboard"}
           </Button>
-          <h1 className="page-h1">Create a <span className="em">QR code</span></h1>
+          <h1 className="page-h1">{isEditing ? "Edit" : "Create a"} <span className="em">QR code</span></h1>
           <div className="page-sub">Configure the destination, customize the design, add a label, activate when ready.</div>
         </div>
       </div>
@@ -1516,50 +1710,86 @@ export default function CreateQr() {
 
           {/* Schedule + Campaign link */}
           <Card className="card-pad-lg">
-            <div className="section-h" style={{ fontSize: 15, marginBottom: 4 }}>Schedule &amp; link</div>
-            <div className="section-sub">Schedule when the QR activates / expires, and optionally attach it to a Campaign landing page.</div>
-
-            <div className="grid grid-2 mt-4">
-              <Field label="Activates at" hint="Leave empty to activate immediately on save.">
-                <input
-                  type="datetime-local"
-                  className="filter-select"
-                  value={activatesAt}
-                  onChange={e => setActivatesAt(e.target.value)}
-                  style={{
-                    height: 38,
-                    width: "100%",
-                    padding: "6px 12px",
-                    background: "var(--bg-surface)",
-                    border: "1px solid var(--border)",
-                    borderRadius: 8,
-                    color: "var(--fg-strong)",
-                    fontSize: 13,
-                  }}
-                />
-              </Field>
-              <Field label="Expires at" hint="After this date, scans return a 'expired' page.">
-                <input
-                  type="datetime-local"
-                  className="filter-select"
-                  value={expiresAt}
-                  onChange={e => setExpiresAt(e.target.value)}
-                  style={{
-                    height: 38,
-                    width: "100%",
-                    padding: "6px 12px",
-                    background: "var(--bg-surface)",
-                    border: "1px solid var(--border)",
-                    borderRadius: 8,
-                    color: "var(--fg-strong)",
-                    fontSize: 13,
-                  }}
-                />
-              </Field>
+            <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12 }}>
+              <div>
+                <div className="section-h" style={{ fontSize: 15, marginBottom: 4 }}>Schedule &amp; campaign</div>
+                <div className="section-sub">Schedule when the QR activates / expires, and choose the Campaign page this QR should open.</div>
+              </div>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={scheduleEnabled}
+                onClick={() => setScheduleEnabled(v => !v)}
+                style={{
+                  width: 42,
+                  height: 24,
+                  borderRadius: 999,
+                  border: "1px solid var(--border)",
+                  background: scheduleEnabled ? "var(--accent)" : "var(--bg-sunken)",
+                  padding: 2,
+                  cursor: "pointer",
+                  flex: "0 0 auto",
+                }}
+                title={scheduleEnabled ? "Disable schedule" : "Enable schedule"}
+              >
+                <span style={{
+                  display: "block",
+                  width: 18,
+                  height: 18,
+                  borderRadius: "50%",
+                  background: "#fff",
+                  transform: scheduleEnabled ? "translateX(16px)" : "translateX(0)",
+                  transition: "transform 160ms ease",
+                  boxShadow: "0 1px 2px rgba(0,0,0,.18)",
+                }} />
+              </button>
             </div>
 
+            {scheduleEnabled && (
+              <div className="grid grid-2 mt-4">
+                <Field label="Activates at" hint="Required when schedule is enabled." required>
+                  <input
+                    type="datetime-local"
+                    className="filter-select"
+                    value={activatesAt}
+                    onChange={e => setActivatesAt(e.target.value)}
+                    required={scheduleEnabled}
+                    style={{
+                      height: 38,
+                      width: "100%",
+                      padding: "6px 12px",
+                      background: "var(--bg-surface)",
+                      border: "1px solid var(--border)",
+                      borderRadius: 8,
+                      color: "var(--fg-strong)",
+                      fontSize: 13,
+                    }}
+                  />
+                </Field>
+                <Field label="Expires at" hint="Required when schedule is enabled." required>
+                  <input
+                    type="datetime-local"
+                    className="filter-select"
+                    value={expiresAt}
+                    onChange={e => setExpiresAt(e.target.value)}
+                    required={scheduleEnabled}
+                    style={{
+                      height: 38,
+                      width: "100%",
+                      padding: "6px 12px",
+                      background: "var(--bg-surface)",
+                      border: "1px solid var(--border)",
+                      borderRadius: 8,
+                      color: "var(--fg-strong)",
+                      fontSize: 13,
+                    }}
+                  />
+                </Field>
+              </div>
+            )}
+
             {campaigns.length > 0 && (
-              <Field label="Attach to Campaign" hint="If set, scans land on this Campaign's published landing page." className="mt-4">
+              <Field label="Campaign page" hint="Scans land on the selected Campaign. Draft and paused campaigns can still be previewed before activation." className="mt-4">
                 <select
                   className="filter-select"
                   value={campaignId}
@@ -1593,99 +1823,48 @@ export default function CreateQr() {
           <Card className="card-pad-lg" accent={activated ? "green" : "blue"}>
             <div className="flex items-center justify-between mb-4">
               <div className="strong" style={{ fontSize: 13.5 }}>Live preview</div>
-              <Badge tone={activated ? "success" : "neutral"} dot>{activated ? "Active" : "Draft"}</Badge>
+              <Badge tone={activated ? "success" : "neutral"} dot>{activated ? "Active" : savedQr ? "Saved draft" : "Unsaved"}</Badge>
             </div>
 
-            <div ref={stageRef}
-              className="qr-stage"
-              data-pos={showLabel ? labelPos : "none"}
-              data-frame={frameStyle !== "none" ? "yes" : "no"}
+            <div
+              className="qr-stage-export-preview"
               style={{
-                background: bg,
-                // Frame SVG is sized to match the actual rendered .qr-stage
-                // box so it tracks any layout change (label left/right etc.).
-                backgroundImage: frameStyle !== "none" && stageSize.w > 0
-                  ? `url("data:image/svg+xml;utf8,${encodeURIComponent(
-                      renderFrameSvg(frameStyle, {
-                        width:  stageSize.w,
-                        height: stageSize.h,
-                        color: fg,
-                        bandColor: hasTextZone ? labelBgColor : undefined,
-                        bg: "transparent",
-                        inset: 8,
-                        strokeWidth: 1.6,
-                        bandSize: dynamicBandSize,
-                        bandOffset,
-                        labelPosition: showLabel ? labelPos : undefined,
-                      })
-                    )}")`
-                  : undefined,
-                backgroundSize: "100% 100%",
-                backgroundRepeat: "no-repeat",
-                border: "none",
-                ["--label-color" as string]: hasTextZone && showLabel
-                  ? labelTextColor
-                  : (frameInvertsLabel(frameStyle) && showLabel ? bg : fg),
-              }}>
-
-              <div className="qr-stage-qr" style={{ background: bg }}>
-                {!valid ? (
-                  <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 8, color: "var(--fg-subtle)", fontSize: 11.5, textAlign: "center", padding: 16 }}>
-                    <Icon name="qr-code" size={28} />
-                    <div>Name your QR code<br />to preview it.</div>
-                  </div>
-                ) : (
-                  <>
-                    <QrSvg
-                      key={renderToken}
-                      text={previewText}
-                      size={220}
-                      fg={fg}
-                      bg={bg}
-                      style={style}
-                      cornerStyle={cornerStyle}
-                      logo={logoSel}
-                      logoSize={logoSizePct / 100}
-                      margin={qrMargin}
-                      cornerColor={cornerColor}
-                      gradient={gradientOn ? { from: gradientFrom, to: gradientTo, angle: gradientAngle } : null}
-                    />
-                    <div className={`qr-loading-overlay ${generating ? "active" : ""}`}>
-                      <div className="qr-loading-spinner" />
-                      <div className="qr-loading-text">Generating…</div>
-                    </div>
-                  </>
-                )}
-              </div>
-
-              {showLabel && valid && (
-                <div
-                  ref={labelRefCb}
-                  className="qr-stage-label"
-                  style={{
-                    fontFamily: labelFontSpec.family,
-                    // Bold overrides the font's natural weight.
-                    fontWeight: labelBold ? 700 : labelFontSpec.weight,
-                    fontStyle: labelItalic ? "italic" : "normal",
-                    textDecoration: labelUnderline ? "underline" : "none",
-                    fontSize: labelFontSize,
-                    textAlign: labelAlign,
-                    letterSpacing: labelFontSpec.letterSpacing,
-                    textTransform: labelFontSpec.textTransform,
-                    // Pin the label width to match the QR (200px top/bottom,
-                    // 180px left/right) so text-align has visible room to
-                    // shift the text — without an explicit width the element
-                    // shrinks to its content and "left/right" looks identical
-                    // to "center". whiteSpace:normal lets long labels wrap.
-                    width: (labelPos === "left" || labelPos === "right") ? 180 : 200,
-                    whiteSpace: "normal",
-                    // When the frame exposes an explicit text zone, the picked
-                    // color is applied inline.
-                    ...(hasTextZone ? { color: labelTextColor } : {}),
-                  }}
-                >
-                  {labelText}
+                position: "relative",
+                display: "grid",
+                placeItems: "center",
+                width: "max-content",
+                maxWidth: "100%",
+                margin: "0 auto",
+                overflow: "visible",
+              }}
+            >
+              {!valid ? (
+                <div style={{ width: 248, height: 248, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 8, background: bg, color: "var(--fg-subtle)", fontSize: 11.5, textAlign: "center", padding: 16, borderRadius: 12 }}>
+                  <Icon name="qr-code" size={28} />
+                  <div>Name your QR code<br />to preview it.</div>
                 </div>
+              ) : (
+                <>
+                  <QrSvg
+                    key={renderToken}
+                    text={previewText}
+                    size={220}
+                    fg={fg}
+                    bg={bg}
+                    style={style}
+                    cornerStyle={cornerStyle}
+                    logo={logoSel}
+                    logoSize={logoSizePct / 100}
+                    margin={qrMargin}
+                    cornerColor={cornerColor}
+                    gradient={gradientOn ? { from: gradientFrom, to: gradientTo, angle: gradientAngle } : null}
+                    label={previewLabel}
+                  />
+                  <div className={`qr-loading-overlay ${generating ? "active" : ""}`}>
+                    <div className="qr-loading-spinner" />
+                    <div className="qr-loading-text">Generating…</div>
+                  </div>
+                </>
               )}
             </div>
 
@@ -1701,53 +1880,83 @@ export default function CreateQr() {
               )}
             </div>
 
-            {!activated ? (
-              <div className="mt-4">
-                <Button variant="success" size="lg" icon="zap"
+            <div className="col gap-2 mt-4">
+              <div className="grid grid-2 gap-2">
+                <Button
+                  variant="primary"
+                  size="lg"
+                  icon="save"
                   disabled={submitting}
-                  onClick={handleActivate}
-                  style={{ width: "100%" }}>
-                  {submitting ? "Activating…" : "Activate QR code"}
+                  onClick={() => submitQr("save")}
+                  style={{ width: "100%" }}
+                >
+                  {submitting && submitMode === "save" ? "Saving…" : "Save"}
                 </Button>
-                <div className="text-xs muted mt-2" style={{ textAlign: "center" }}>
-                  Activate to test, download or share.
-                </div>
+                <Button
+                  variant="secondary"
+                  size="lg"
+                  icon="save"
+                  disabled={submitting}
+                  onClick={() => submitQr("saveExit")}
+                  style={{ width: "100%" }}
+                >
+                  {submitting && submitMode === "saveExit" ? "Saving…" : "Save & exit"}
+                </Button>
               </div>
-            ) : (
-              <div className="col gap-2 mt-4">
-                <div className="strong" style={{ fontSize: 12 }}>Scan URL</div>
-                <div style={{ fontFamily: "var(--ff-mono)", fontSize: 11, padding: "8px 10px", background: "var(--bg-sunken)", border: "1px solid var(--border)", borderRadius: 6, display: "flex", alignItems: "center", gap: 8 }}>
-                  <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                    {fetcher.data?.ok && fetcher.data.slug ? `${typeof window !== "undefined" ? window.location.origin : ""}/s/${fetcher.data.slug}` : previewText}
-                  </span>
-                  <Button size="sm" variant="ghost" onClick={() => {
-                    const url = fetcher.data?.ok && fetcher.data.slug ? `${window.location.origin}/s/${fetcher.data.slug}` : previewText;
-                    navigator.clipboard?.writeText(url);
-                    toast({ title: "Link copied", type: "info" });
-                  }}>
-                    <Icon name="copy" size={12} />
+
+              <Button
+                variant="success"
+                size="lg"
+                icon={activated ? "circle-check" : "zap"}
+                disabled={submitting || !savedQr || activated}
+                title={!savedQr ? "Save this QR code before activating it" : activated ? "QR code is already active" : "Activate QR code"}
+                onClick={() => submitQr("activate")}
+                style={{ width: "100%" }}
+              >
+                {submitting && submitMode === "activate" ? "Activating…" : activated ? "Active" : "Activate"}
+              </Button>
+
+              <div className="text-xs muted" style={{ textAlign: "center" }}>
+                {!savedQr ? "Save first to unlock activation and downloads." : activated ? "Changes can still be saved while this QR stays active." : "Saved drafts can be activated here or from My QR codes."}
+              </div>
+
+              <div className="strong mt-2" style={{ fontSize: 12 }}>Scan URL</div>
+              <div style={{ fontFamily: "var(--ff-mono)", fontSize: 11, padding: "8px 10px", background: "var(--bg-sunken)", border: "1px solid var(--border)", borderRadius: 6, display: "flex", alignItems: "center", gap: 8 }}>
+                <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: savedQr ? "var(--fg-strong)" : "var(--fg-muted)" }}>
+                  {savedQr ? previewText : "Save first to generate a scan URL"}
+                </span>
+                <Button size="sm" variant="ghost" disabled={!savedQr} onClick={() => {
+                  if (!savedQr) return;
+                  navigator.clipboard?.writeText(previewText);
+                  toast({ title: "Link copied", type: "info" });
+                }}>
+                  <Icon name="copy" size={12} />
+                </Button>
+              </div>
+
+              <div className="grid grid-3 gap-2 mt-2">
+                {(["png", "svg", "pdf"] as DownloadFormat[]).map(format => (
+                  <Button
+                    key={format}
+                    size="sm"
+                    variant="secondary"
+                    icon="download"
+                    disabled={!savedQr || downloading === format}
+                    title={!savedQr ? "Save this QR code before downloading it" : `Download ${format.toUpperCase()}`}
+                    onClick={() => handleDownload(format)}
+                    style={{ width: "100%" }}
+                  >
+                    {format.toUpperCase()}
                   </Button>
-                </div>
-                {fetcher.data?.ok && fetcher.data.id && (
-                  <div className="grid grid-3 gap-2 mt-2">
-                    <a href={`/qr/${fetcher.data.id}/png`} target="_blank" rel="noopener noreferrer" style={{ textDecoration: "none" }}>
-                      <Button size="sm" variant="secondary" icon="download" style={{ width: "100%" }}>PNG</Button>
-                    </a>
-                    <a href={`/qr/${fetcher.data.id}/svg`} target="_blank" rel="noopener noreferrer" style={{ textDecoration: "none" }}>
-                      <Button size="sm" variant="secondary" icon="download" style={{ width: "100%" }}>SVG</Button>
-                    </a>
-                    <a href={`/qr/${fetcher.data.id}/pdf`} target="_blank" rel="noopener noreferrer" style={{ textDecoration: "none" }}>
-                      <Button size="sm" variant="secondary" icon="download" style={{ width: "100%" }}>PDF</Button>
-                    </a>
-                  </div>
-                )}
-                <Button size="md" variant="primary" icon="eye"
-                  style={{ marginTop: 4 }}
-                  onClick={() => navigate("/app/qr-manager")}>
-                  Go to My QR codes
-                </Button>
+                ))}
               </div>
-            )}
+
+              <Button size="md" variant="primary" icon="eye"
+                style={{ marginTop: 4 }}
+                onClick={() => navigate("/app/qr-manager")}>
+                Go to My QR codes
+              </Button>
+            </div>
           </Card>
 
           <div className="text-xs muted mt-4" style={{ textAlign: "center", padding: "0 12px" }}>

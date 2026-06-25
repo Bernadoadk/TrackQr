@@ -1,5 +1,5 @@
 import type { LoaderFunctionArgs } from "react-router";
-import { getQrBySlug } from "../lib/qr-crud.server";
+import { deactivateQrById, getQrBySlug } from "../lib/qr-crud.server";
 import { buildRedirectTarget } from "../lib/qr.server";
 import { parseRequest, recordScan } from "../lib/tracking.server";
 
@@ -26,6 +26,7 @@ export const loader = async ({ params, request }: LoaderFunctionArgs) => {
     return errorPage("This QR code isn't active yet — check back later.", 425);
   }
   if (qr.expiresAt && qr.expiresAt <= now) {
+    await deactivateQrById(qr.id);
     return errorPage("This QR code has expired.", 410);
   }
 

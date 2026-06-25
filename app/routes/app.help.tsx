@@ -17,7 +17,7 @@ const FAQS = [
   { id: "b", q: "Will my QR code keep working if I edit it?", a: "Yes. The short URL stays the same. We re-route the destination in milliseconds when you edit and save." },
   { id: "c", q: "Can I add my logo to the center?", a: "Yes — under Design → Center logo. We auto-add error-correction so scanning stays reliable." },
   { id: "d", q: "How are conversions attributed?", a: "We attribute conversions to a scan when the visitor reaches the Shopify thank-you page within 7 days from the same device." },
-  { id: "e", q: "Where are leads from a campaign stored?", a: "By default in TrackQr's database, exportable as CSV. Connect Klaviyo or Mailchimp under Campaign → Settings → Leads." },
+  { id: "e", q: "Where are leads from a campaign stored?", a: "Campaign leads are saved in TrackQr, exportable as CSV, and the merchant receives each submission by SMTP when the block has a recipient email." },
 ];
 
 export default function Help() {

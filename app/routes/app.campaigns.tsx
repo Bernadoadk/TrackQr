@@ -182,6 +182,9 @@ export default function Campaigns() {
     Object.entries(extra).forEach(([k, v]) => fd.set(k, v));
     fetcher.submit(fd, { method: "post" });
   };
+  const openPreview = (id: string) => {
+    window.open(`${window.location.origin}/campaigns/${id}/preview`, "_blank", "noopener,noreferrer");
+  };
 
   return (
     <>
@@ -275,13 +278,16 @@ export default function Campaigns() {
               </div>
 
               <div className="flex gap-2" style={{ flexShrink: 0 }}>
+                <Button variant="secondary" size="sm" icon="eye" onClick={() => openPreview(c.id)}>Preview</Button>
                 {c.status === "DRAFT" ? (
-                  <Button variant="primary" size="sm" icon="play" onClick={() => navigate(`/app/campaigns/${c.id}/edit`)}>Continue</Button>
+                  <Button variant="primary" size="sm" icon="edit" onClick={() => navigate(`/app/campaigns/${c.id}/edit`)}>Edit</Button>
                 ) : (
                   <>
-                    <a href={`/c/${c.slug}`} target="_blank" rel="noopener noreferrer">
-                      <Button variant="secondary" size="sm" icon="external-link">Live page</Button>
-                    </a>
+                    {c.status === "ACTIVE" && (
+                      <a href={`/c/${c.slug}`} target="_blank" rel="noopener noreferrer">
+                        <Button variant="secondary" size="sm" icon="external-link">Live page</Button>
+                      </a>
+                    )}
                     <Button variant="secondary" size="sm" icon="edit" onClick={() => navigate(`/app/campaigns/${c.id}/edit`)}>Edit</Button>
                   </>
                 )}

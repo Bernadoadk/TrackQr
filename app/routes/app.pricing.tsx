@@ -109,7 +109,7 @@ function featuresFor(plan: ReturnType<typeof useLoaderData<typeof loader>>["plan
   items.push({ label: plan.historyDays == null   ? "Historique illimité"    : `Historique scans — ${plan.historyDays >= 365 ? "1 an" : `${plan.historyDays} jours`}`, included: true });
   items.push({ label: "Couleurs & styles personnalisés", included: true });
   items.push({ label: "Attribution commandes Shopify",   included: plan.attribution,  hl: plan.attribution });
-  items.push({ label: "Sync leads Klaviyo + Mailchimp",  included: plan.integrations, hl: plan.integrations });
+  items.push({ label: "Notifications leads par SMTP",   included: true });
   items.push({ label: "Multi-boutiques Shopify",         included: plan.multiStore });
   items.push({ label: "Accès API + webhooks",            included: plan.api });
   items.push({ label: "Domaine de redirection personnalisé", included: plan.customDomain });

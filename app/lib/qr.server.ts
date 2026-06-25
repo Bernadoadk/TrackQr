@@ -8,6 +8,8 @@ export interface QrDesign {
   fg?: string;
   bg?: string;
   withLogo?: boolean;
+  logoBrand?: string | null;
+  logoUrl?: string | null;
   logoAssetId?: string | null;
   /** Logo size as fraction of QR (e.g. 0.20 = 20%). Default 0.20. */
   logoSize?: number;
@@ -44,7 +46,7 @@ export interface QrLabel {
 }
 
 export const DEFAULT_DESIGN: Required<Omit<QrDesign,
-  "logoAssetId" | "gradient">> = {
+  "logoBrand" | "logoUrl" | "logoAssetId" | "gradient">> = {
   style: "rounded",
   cornerStyle: "rounded",
   fg: "#0B1220",

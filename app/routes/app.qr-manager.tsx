@@ -14,6 +14,7 @@ import { StatCard } from "../components/ui/StatCard";
 import { EmptyState } from "../components/ui/EmptyState";
 import { Segmented } from "../components/ui/Segmented";
 import { useToast } from "../components/ui/Toast";
+import { downloadQrAsset, type DownloadFormat } from "../lib/qr-download";
 import type { QrType } from "@prisma/client";
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
@@ -101,29 +102,8 @@ function fmtRel(date: Date | string) {
   if (hr < 24) return `${hr}h ago`;
   return `${Math.floor(hr / 24)}d ago`;
 }
-
-function QrThumb({ color }: { color: string }) {
-  return (
-    <svg viewBox="0 0 100 100" width="100%" height="100%" style={{ color }}>
-      <rect x="5"  y="5"  width="28" height="28" rx="4" fill="currentColor"/>
-      <rect x="10" y="10" width="18" height="18" rx="2" fill="#fff"/>
-      <rect x="14" y="14" width="10" height="10" rx="1" fill="currentColor"/>
-      <rect x="67" y="5"  width="28" height="28" rx="4" fill="currentColor"/>
-      <rect x="72" y="10" width="18" height="18" rx="2" fill="#fff"/>
-      <rect x="76" y="14" width="10" height="10" rx="1" fill="currentColor"/>
-      <rect x="5"  y="67" width="28" height="28" rx="4" fill="currentColor"/>
-      <rect x="10" y="72" width="18" height="18" rx="2" fill="#fff"/>
-      <rect x="14" y="76" width="10" height="10" rx="1" fill="currentColor"/>
-      {[
-        [40,5],[46,5],[52,5],[58,5],[40,11],[52,11],[40,17],[46,17],[58,17],[40,23],[46,23],[52,23],[58,23],
-        [5,40],[11,40],[23,40],[29,40],[5,46],[17,46],[29,46],[5,52],[11,52],[17,52],[23,52],
-        [40,40],[46,40],[52,40],[58,40],[40,46],[52,46],[58,46],[46,52],[40,58],[46,58],[58,58],
-        [40,67],[52,67],[58,67],[46,73],[40,79],[52,79],[58,79],[46,85],[52,85],[40,91],[58,91],
-      ].map(([x, y], i) => (
-        <rect key={i} x={x} y={y} width="4" height="4" rx="0.8" fill="currentColor" />
-      ))}
-    </svg>
-  );
+function fmtDate(date: Date | string) {
+  return new Date(date).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
 }
 
 /* ════════════════════════ Page ════════════════════════ */
@@ -137,6 +117,7 @@ export default function QrManager() {
   const [typeFilter,   setTypeFilter]   = useState("all");
   const [statusFilter, setStatusFilter] = useState("all");
   const [sortBy,       setSortBy]       = useState("recent");
+  const [downloading,   setDownloading]  = useState<string | null>(null);
 
   const totalScans  = items.reduce((s, q) => s + q.scans, 0);
   const totalConv   = items.reduce((s, q) => s + q.conversions, 0);
@@ -173,6 +154,19 @@ export default function QrManager() {
     fd.set("id", id);
     Object.entries(extra).forEach(([k, v]) => fd.set(k, v));
     fetcher.submit(fd, { method: "post" });
+  };
+
+  const downloadQr = async (qr: (typeof items)[number], format: DownloadFormat) => {
+    const key = `${qr.id}:${format}`;
+    setDownloading(key);
+    try {
+      await downloadQrAsset(qr, format);
+      toast({ title: `${format.toUpperCase()} downloaded`, type: "info" });
+    } catch (err) {
+      toast({ type: "error", title: "Download failed", desc: err instanceof Error ? err.message : "Try again." });
+    } finally {
+      setDownloading(null);
+    }
   };
 
   return (
@@ -241,7 +235,7 @@ export default function QrManager() {
         {query && (
           <span className="filter-chip">
             <span className="filter-chip-label">Search</span>
-            <span style={{ maxWidth: 180, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>"{query}"</span>
+            <span style={{ maxWidth: 180, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>&quot;{query}&quot;</span>
             <button className="filter-chip-x" onClick={() => setQuery("")} aria-label="Clear search"><Icon name="x" size={10} /></button>
           </span>
         )}
@@ -289,7 +283,6 @@ export default function QrManager() {
           {sorted.map(qr => {
             const tm = typeMeta(QR_TYPE_TO_UI[qr.type] ?? "link");
             const scanLink = `${origin}/s/${qr.slug}`;
-            const fg = (qr.design as { fg?: string })?.fg ?? "#0B1220";
             return (
               <Card key={qr.id} hoverLift className="card-pad">
                 <div className="flex items-center gap-3 mb-3" style={{ justifyContent: "space-between" }}>
@@ -320,6 +313,14 @@ export default function QrManager() {
 
                 <div className="strong" style={{ fontSize: 13.5, marginBottom: 4 }}>{qr.name}</div>
                 <div className="text-xs muted mb-3">Created {fmtRel(qr.createdAt)}</div>
+                {(qr.activatesAt || qr.expiresAt) && (
+                  <div className="text-xs muted mb-3" style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                    <Icon name="calendar" size={12} />
+                    <span>
+                      {qr.activatesAt ? fmtDate(qr.activatesAt) : "Now"} - {qr.expiresAt ? fmtDate(qr.expiresAt) : "No end"}
+                    </span>
+                  </div>
+                )}
 
                 <div className="flex items-center gap-3" style={{ paddingTop: 10, borderTop: "1px solid var(--border-soft)" }}>
                   <div style={{ flex: 1 }}>
@@ -332,6 +333,12 @@ export default function QrManager() {
                   </div>
                   <div className="flex gap-2">
                     <Button size="sm" variant="ghost"
+                      title="Edit QR code"
+                      onClick={() => navigate(`/app/create?edit=${qr.id}`)}>
+                      <Icon name="edit" size={13} />
+                    </Button>
+                    <Button size="sm" variant="ghost"
+                      title="Copy scan link"
                       onClick={() => {
                         navigator.clipboard?.writeText(scanLink);
                         toast({ title: "Link copied", type: "info" });
@@ -339,13 +346,72 @@ export default function QrManager() {
                       <Icon name="copy" size={13} />
                     </Button>
                     <Button size="sm" variant="ghost"
+                      title={qr.active ? "Deactivate QR code" : "Activate QR code"}
                       onClick={() => submitIntent("toggle", qr.id, { active: qr.active ? "0" : "1" })}>
                       <Icon name={qr.active ? "pause" : "play"} size={13} />
                     </Button>
-                    <a href={`/qr/${qr.id}/png`} target="_blank" rel="noopener noreferrer">
-                      <Button size="sm" variant="ghost"><Icon name="download" size={13} /></Button>
-                    </a>
                     <Button size="sm" variant="ghost"
+                      title="Duplicate QR code"
+                      onClick={() => submitIntent("duplicate", qr.id)}>
+                      <Icon name="layers" size={13} />
+                    </Button>
+                    <details style={{ position: "relative" }}>
+                      <summary
+                        title="Download QR code"
+                        style={{
+                          listStyle: "none",
+                          width: 30,
+                          height: 30,
+                          display: "grid",
+                          placeItems: "center",
+                          borderRadius: 8,
+                          cursor: "pointer",
+                          color: "var(--fg-muted)",
+                        }}
+                      >
+                        <Icon name="download" size={13} />
+                      </summary>
+                      <div style={{
+                        position: "absolute",
+                        right: 0,
+                        bottom: 36,
+                        minWidth: 112,
+                        padding: 6,
+                        background: "var(--bg-surface)",
+                        border: "1px solid var(--border)",
+                        borderRadius: 8,
+                        boxShadow: "0 18px 40px rgba(15, 23, 42, .18)",
+                        zIndex: 20,
+                      }}>
+                        {(["png", "svg", "pdf"] as DownloadFormat[]).map(format => (
+                          <button
+                            key={format}
+                            type="button"
+                            disabled={downloading === `${qr.id}:${format}`}
+                            onClick={() => downloadQr(qr, format)}
+                            style={{
+                              width: "100%",
+                              display: "flex",
+                              alignItems: "center",
+                              gap: 8,
+                              padding: "8px 10px",
+                              border: 0,
+                              borderRadius: 6,
+                              background: "transparent",
+                              color: "var(--fg-strong)",
+                              cursor: "pointer",
+                              fontSize: 12,
+                              textAlign: "left",
+                            }}
+                          >
+                            <Icon name="download" size={12} />
+                            {format.toUpperCase()}
+                          </button>
+                        ))}
+                      </div>
+                    </details>
+                    <Button size="sm" variant="ghost"
+                      title="Delete QR code"
                       onClick={() => {
                         if (!confirm(`Delete "${qr.name}"? This also removes its scans.`)) return;
                         submitIntent("delete", qr.id);

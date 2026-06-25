@@ -1,16 +1,12 @@
 import type { ActionFunctionArgs } from "react-router";
 import { requireShop } from "../lib/shop.server";
-import { uploadLogoToShopify } from "../lib/files.server";
+import { uploadImageToCloudinary } from "../lib/files.server";
 
 const MAX_BYTES = 2 * 1024 * 1024; // 2 MB
 const ALLOWED_TYPES = ["image/png", "image/jpeg", "image/svg+xml", "image/webp", "image/gif"];
 
-interface AdminGraphqlBound {
-  graphql: (q: string, options?: { variables?: Record<string, unknown> }) => Promise<{ json: <T>() => Promise<T> }>;
-}
-
 export const action = async ({ request }: ActionFunctionArgs) => {
-  const { admin, shop } = await requireShop(request);
+  const { shop } = await requireShop(request);
   const form = await request.formData();
   const file = form.get("file");
   if (!(file instanceof File)) {
@@ -25,8 +21,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
   try {
     const bytes = Buffer.from(await file.arrayBuffer());
-    const uploaded = await uploadLogoToShopify({
-      admin: admin as unknown as AdminGraphqlBound,
+    const uploaded = await uploadImageToCloudinary({
       shopId: shop.id,
       file: {
         name: file.name || `logo-${Date.now()}`,

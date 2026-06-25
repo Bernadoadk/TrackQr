@@ -13,6 +13,7 @@ export const loader = async ({ params, request }: LoaderFunctionArgs) => {
   const url = new URL(request.url);
   const size = Math.max(128, Math.min(2048, parseInt(url.searchParams.get("size") ?? "512", 10)));
   const includeLabel = url.searchParams.get("plain") !== "1";
+  const disposition = url.searchParams.get("download") === "1" ? "attachment" : "inline";
 
   const design = qr.design as Record<string, unknown>;
   const labelData = qr.label  as Record<string, unknown>;
@@ -59,7 +60,7 @@ export const loader = async ({ params, request }: LoaderFunctionArgs) => {
     status: 200,
     headers: {
       "Content-Type": "image/svg+xml",
-      "Content-Disposition": `inline; filename="${qr.slug}.svg"`,
+      "Content-Disposition": `${disposition}; filename="${qr.slug}.svg"`,
       "Cache-Control": "public, max-age=300",
     },
   });

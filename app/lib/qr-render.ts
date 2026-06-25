@@ -408,7 +408,10 @@ export function renderQrSvg(text: string, opts: QrRenderOpts = {}): string {
     const ls = Math.round(size * logoSize);
     const lx = (size - ls) / 2;
     const ly = (size - ls) / 2;
-    logo = `<image href="${opts.logoDataUrl}" x="${lx}" y="${ly}" width="${ls}" height="${ls}" preserveAspectRatio="xMidYMid meet"/>`;
+    const pad = Math.max(2, Math.round(size * 0.018));
+    logo =
+      `<rect x="${lx - pad}" y="${ly - pad}" width="${ls + pad * 2}" height="${ls + pad * 2}" rx="${Math.max(4, ls * 0.18)}" fill="${o.bg}"/>` +
+      `<image href="${escapeXmlAttr(opts.logoDataUrl)}" x="${lx}" y="${ly}" width="${ls}" height="${ls}" preserveAspectRatio="xMidYMid meet"/>`;
   } else if (o.withLogo) {
     const ls = Math.round(size * logoSize);
     const half = ls / 2;
@@ -454,7 +457,7 @@ export function renderQrSvg(text: string, opts: QrRenderOpts = {}): string {
 
   const hasLabel = !!(label.text && label.position && label.position !== "none");
   const hasFrame = labelFrame !== "none";
-  if (!hasLabel && !hasFrame) return innerSvg;
+  if (!opts.label && !hasLabel && !hasFrame) return innerSvg;
 
   return wrapWithLabelAndFrame(innerSvg, size, o.bg, o.fg, { ...label, frame: labelFrame });
 }
@@ -464,7 +467,6 @@ export function renderQrSvg(text: string, opts: QrRenderOpts = {}): string {
  * and an optional outer frame. Output dimensions adapt to the position.
  */
 function wrapWithLabelAndFrame(qrSvg: string, qrSize: number, bg: string, fg: string, label: QrLabelOpts): string {
-  const padding = 24;
   const text = label.text ?? "";
   const pos  = label.position ?? "none";
   const frameStyle: FrameStyle =
@@ -473,11 +475,22 @@ function wrapWithLabelAndFrame(qrSvg: string, qrSize: number, bg: string, fg: st
   const framed = frameStyle !== "none";
   const frameColor = label.frameColor ?? fg;
   const fontSpec = getLabelFont(label.font);
+  const scale = qrSize / 220;
+  const qrBox = (pos === "left" || pos === "right") ? 160 * scale : 200 * scale;
+  const qrCol = (pos === "left" || pos === "right") ? 200 * scale : qrBox;
+  const gap = (text && pos !== "none") ? 16 * scale : 0;
+  const pad = framed
+    ? (pos === "left" || pos === "right"
+      ? { top: 32 * scale, right: 28 * scale, bottom: 32 * scale, left: 28 * scale }
+      : pos === "top" || pos === "bottom"
+        ? { top: 28 * scale, right: 32 * scale, bottom: 32 * scale, left: 32 * scale }
+        : { top: 32 * scale, right: 32 * scale, bottom: 32 * scale, left: 32 * scale })
+    : { top: 24 * scale, right: 24 * scale, bottom: 24 * scale, left: 24 * scale };
 
   // Font stack respects the user's picked font.
   const fontStack = fontSpec.family;
   // Honor the rich-text toolbar size; fall back to the position default.
-  const fontSize = label.size ?? (pos === "left" || pos === "right" ? 14 : 18);
+  const fontSize = (label.size ?? (pos === "left" || pos === "right" ? 14 : 18)) * scale;
   // Bold from the toolbar wins over the font's natural weight.
   const fontWeight = label.bold ? 700 : (fontSpec.weight ?? 600);
   const fontStyle  = label.italic ? "italic" : "normal";
@@ -496,69 +509,76 @@ function wrapWithLabelAndFrame(qrSvg: string, qrSize: number, bg: string, fg: st
   const color = label.labelColor ?? baseColor;
   const align = label.align ?? "center";
 
-  // Approximate text bbox (no DOM available server-side).
-  const charWidth = fontSize * 0.55;
-  const lineHeight = fontSize * 1.3;
-  const lines = text.split("\n");
-  const longest = Math.max(...lines.map(l => l.length), 1);
-  const textWidth  = Math.min(qrSize, longest * charWidth + 16);
-  const textHeight = lines.length * lineHeight + 8;
+  const labelBoxW = (pos === "left" || pos === "right") ? 180 * scale : 200 * scale;
+  const labelPadX = (pos === "left" || pos === "right") ? 12 * scale : 0;
+  const lineHeight = fontSize * (pos === "left" || pos === "right" ? 1.3 : 1.22);
+  const lines = wrapLabelLines(text, labelBoxW - labelPadX * 2, fontSize);
+  const textHeight = lines.length ? lines.length * lineHeight : 0;
+  const labelBoxH = text ? textHeight : 0;
 
-  // Layout: compute outer canvas dimensions and qr/label positions.
-  let outerW = qrSize;
-  let outerH = qrSize;
-  let qrX = 0, qrY = 0;
-  let textX = qrSize / 2;
-  let textY = 0;
+  let contentW = qrBox;
+  let contentH = qrBox;
+  let qrX = pad.left;
+  let qrY = pad.top;
+  let labelX = pad.left;
+  let labelY = pad.top;
+
+  if (pos === "top") {
+    contentW = Math.max(qrBox, labelBoxW);
+    contentH = labelBoxH + gap + qrBox;
+    labelX = pad.left + (contentW - labelBoxW) / 2;
+    labelY = pad.top;
+    qrX = pad.left + (contentW - qrBox) / 2;
+    qrY = pad.top + labelBoxH + gap;
+  } else if (pos === "bottom") {
+    contentW = Math.max(qrBox, labelBoxW);
+    contentH = qrBox + gap + labelBoxH;
+    qrX = pad.left + (contentW - qrBox) / 2;
+    qrY = pad.top;
+    labelX = pad.left + (contentW - labelBoxW) / 2;
+    labelY = pad.top + qrBox + gap;
+  } else if (pos === "left") {
+    contentW = labelBoxW + gap + qrCol;
+    contentH = Math.max(qrBox, labelBoxH);
+    labelX = pad.left;
+    labelY = pad.top + (contentH - labelBoxH) / 2;
+    qrX = pad.left + labelBoxW + gap + (qrCol - qrBox) / 2;
+    qrY = pad.top + (contentH - qrBox) / 2;
+  } else if (pos === "right") {
+    contentW = qrCol + gap + labelBoxW;
+    contentH = Math.max(qrBox, labelBoxH);
+    qrX = pad.left + (qrCol - qrBox) / 2;
+    qrY = pad.top + (contentH - qrBox) / 2;
+    labelX = pad.left + qrCol + gap;
+    labelY = pad.top + (contentH - labelBoxH) / 2;
+  }
+
+  const outerW = contentW + pad.left + pad.right;
+  const outerH = contentH + pad.top + pad.bottom;
+
   // Map the user's alignment to SVG's text-anchor for the chosen column.
   const textAnchor: "start" | "middle" | "end" =
     align === "left" ? "start" : align === "right" ? "end" : "middle";
-  // Resolve the X coordinate of `textX` to the appropriate column edge.
-  // `colLeft` / `colRight` bracket the column; `pad` lets the text breathe.
-  const xForAlign = (colLeft: number, colRight: number, pad = 8): number =>
-    align === "left"  ? colLeft + pad :
-    align === "right" ? colRight - pad :
-                        (colLeft + colRight) / 2;
+  const textX =
+    align === "left" ? labelX + labelPadX :
+    align === "right" ? labelX + labelBoxW - labelPadX :
+    labelX + labelBoxW / 2;
+  const firstBaseline = labelY + (lineHeight - fontSize) / 2 + fontSize * 0.82;
 
-  if (pos === "top") {
-    outerH = qrSize + textHeight + 12;
-    qrY = textHeight + 12;
-    textX = xForAlign(0, qrSize);
-    textY = textHeight - 8;
-  } else if (pos === "bottom") {
-    outerH = qrSize + textHeight + 12;
-    textX = xForAlign(0, qrSize);
-    textY = qrSize + textHeight - 4;
-  } else if (pos === "left") {
-    outerW = qrSize + textWidth + 16;
-    qrX = textWidth + 16;
-    textX = xForAlign(0, textWidth);
-    textY = qrSize / 2 + fontSize / 3;
-  } else if (pos === "right") {
-    outerW = qrSize + textWidth + 16;
-    textX = xForAlign(qrSize + 16, qrSize + 16 + textWidth);
-    textY = qrSize / 2 + fontSize / 3;
-  }
-
-  // Frame padding
-  if (framed) {
-    outerW += padding * 2;
-    outerH += padding * 2;
-    qrX   += padding;
-    qrY   += padding;
-    textX += padding;
-    textY += padding;
-  }
-
-  // Background + frame decoration. The decorative frame is generated by
-  // renderFrameSvg so preview (CSS) and download (SVG) match exactly.
+  // Background + frame decoration. The same composed SVG is used by the live
+  // preview and the download route, so frame geometry stays identical.
   const bgRect = `<rect width="${outerW}" height="${outerH}" fill="${bg}"/>`;
   const frameSvg = framed
     ? renderFrameSvg(frameStyle, {
         width: outerW, height: outerH,
         color: frameColor,
         bandColor: label.bandColor,
-        bg, inset: 6, strokeWidth: 1.6, labelPosition: pos,
+        bg: "transparent",
+        inset: 8 * scale,
+        strokeWidth: 1.6 * scale,
+        labelPosition: pos,
+        bandSize: pos === "left" || pos === "right" ? labelBoxW + 24 * scale : labelBoxH + 16 * scale,
+        bandOffset: pos === "none" ? 0 : 20 * scale,
       })
     : "";
   const frameInner = framed ? frameSvg.replace(/^<svg[^>]*>/, "").replace(/<\/svg>$/, "") : "";
@@ -569,18 +589,49 @@ function wrapWithLabelAndFrame(qrSvg: string, qrSize: number, bg: string, fg: st
   const inner = qrSvg.replace(/^<svg[^>]*>/, "").replace(/<\/svg>$/, "");
 
   const labelEl = (pos !== "none" && text)
-    ? lines.map((line, i) => `<text x="${textX}" y="${textY + (i - lines.length + 1) * lineHeight}" fill="${color}" font-family='${fontStack}' font-size="${fontSize}" font-weight="${fontWeight}" text-anchor="${textAnchor}" style="${transform}">${escapeXml(line)}</text>`).join("")
+    ? lines.map((line, i) => `<text x="${textX}" y="${firstBaseline + i * lineHeight}" fill="${escapeXmlAttr(color)}" font-family="${escapeXmlAttr(fontStack)}" font-size="${fontSize}" font-weight="${fontWeight}" text-anchor="${textAnchor}" style="${escapeXmlAttr(transform)}">${escapeXml(line)}</text>`).join("")
     : "";
 
   return `<?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${outerW} ${outerH}" width="${outerW}" height="${outerH}">
   ${bgRect}
   ${frameInner}
-  <g transform="translate(${qrX}, ${qrY})">${inner}</g>
+  <g transform="translate(${qrX}, ${qrY}) scale(${qrBox / qrSize})">${inner}</g>
   ${labelEl}
 </svg>`;
 }
 
+function wrapLabelLines(text: string, maxWidth: number, fontSize: number): string[] {
+  if (!text) return [];
+  const charWidth = fontSize * 0.55;
+  const maxChars = Math.max(1, Math.floor(maxWidth / charWidth));
+  const lines: string[] = [];
+  for (const rawLine of text.split("\n")) {
+    const words = rawLine.split(/\s+/).filter(Boolean);
+    if (!words.length) {
+      lines.push("");
+      continue;
+    }
+    let line = "";
+    for (const word of words) {
+      if (!line) {
+        line = word;
+      } else if ((line.length + 1 + word.length) <= maxChars) {
+        line += ` ${word}`;
+      } else {
+        lines.push(line);
+        line = word;
+      }
+    }
+    if (line) lines.push(line);
+  }
+  return lines;
+}
+
 function escapeXml(s: string): string {
   return s.replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]!));
+}
+
+function escapeXmlAttr(s: string): string {
+  return escapeXml(s);
 }

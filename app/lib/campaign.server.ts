@@ -122,9 +122,38 @@ export async function listCampaigns(shopId: string): Promise<CampaignListItem[]>
 }
 
 export async function getCampaign(shopId: string, id: string) {
-  return prisma.campaign.findFirst({ where: { id, shopId } });
+  return prisma.campaign.findFirst({
+    where: { id, shopId },
+    include: {
+      qrCode: {
+        select: { id: true, name: true, slug: true },
+      },
+    },
+  });
 }
 
 export async function getCampaignBySlug(slug: string) {
   return prisma.campaign.findUnique({ where: { slug }, include: { shop: true } });
+}
+
+export async function listCampaignBlockQrChoices(shopId: string) {
+  const rows = await prisma.qrCode.findMany({
+    where: {
+      shopId,
+      archivedAt: null,
+    },
+    orderBy: { createdAt: "desc" },
+    select: {
+      id: true,
+      name: true,
+      slug: true,
+      type: true,
+      target: true,
+      active: true,
+      campaignId: true,
+      design: true,
+      label: true,
+    },
+  });
+  return rows;
 }

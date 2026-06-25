@@ -10,13 +10,14 @@ export const loader = async ({ params, request }: LoaderFunctionArgs) => {
 
   const url = new URL(request.url);
   const size = Math.max(128, Math.min(4096, parseInt(url.searchParams.get("size") ?? "1024", 10)));
+  const disposition = url.searchParams.get("download") === "1" ? "attachment" : "inline";
   const png = await renderQrPng(scanUrl(qr.slug), qr.design as QrDesign, size);
 
   return new Response(png as BodyInit, {
     status: 200,
     headers: {
       "Content-Type": "image/png",
-      "Content-Disposition": `inline; filename="${qr.slug}.png"`,
+      "Content-Disposition": `${disposition}; filename="${qr.slug}.png"`,
       "Cache-Control": "public, max-age=300",
     },
   });

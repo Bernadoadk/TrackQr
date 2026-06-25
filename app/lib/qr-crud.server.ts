@@ -18,6 +18,8 @@ export const CreateQrSchema = z.object({
     fg: z.string().regex(/^#[0-9a-fA-F]{6}$/).optional(),
     bg: z.string().regex(/^#[0-9a-fA-F]{6}$/).optional(),
     withLogo: z.boolean().optional(),
+    logoBrand: z.string().nullable().optional(),
+    logoUrl: z.string().nullable().optional(),
     logoAssetId: z.string().nullable().optional(),
     /** Logo size as fraction of QR (0.10 – 0.30). */
     logoSize: z.number().min(0.05).max(0.4).optional(),
@@ -64,10 +66,29 @@ export const CreateQrSchema = z.object({
 
 export type CreateQrInput = z.infer<typeof CreateQrSchema>;
 
+async function prepareCampaignLink(shopId: string, campaignId: string | null | undefined, currentQrId?: string) {
+  if (!campaignId) return;
+  const campaign = await prisma.campaign.findFirst({
+    where: { id: campaignId, shopId },
+    select: { id: true },
+  });
+  if (!campaign) throw new Error("Campaign not found");
+
+  await prisma.qrCode.updateMany({
+    where: {
+      shopId,
+      campaignId,
+      ...(currentQrId ? { id: { not: currentQrId } } : {}),
+    },
+    data: { campaignId: null },
+  });
+}
+
 export async function createQr(shop: ShopWithPlan, input: CreateQrInput): Promise<QrCode> {
   await assertQuota(shop, "qrCodes");
   const parsed = CreateQrSchema.parse(input);
   const type: QrType = parseQrType(parsed.type);
+  await prepareCampaignLink(shop.id, parsed.campaignId);
 
   // Generate a unique slug — retry up to 5 times on collision (statistically: never).
   for (let i = 0; i < 5; i++) {
@@ -119,18 +140,43 @@ export async function updateQr(shopId: string, id: string, input: Partial<Create
   if (input.utmCampaign !== undefined) next.utmCampaign = input.utmCampaign;
   if (input.utmSource !== undefined)   next.utmSource   = input.utmSource;
   if (input.utmMedium !== undefined)   next.utmMedium   = input.utmMedium;
+  if (input.utmTerm !== undefined)     next.utmTerm     = input.utmTerm;
   if (input.type !== undefined)        next.type        = parseQrType(input.type);
   if (input.design !== undefined)      next.design      = { ...(qr.design as object), ...input.design };
   if (input.label !== undefined)       next.label       = { ...(qr.label as object), ...input.label };
+  if (input.activatesAt !== undefined) next.activatesAt = input.activatesAt ? new Date(input.activatesAt) : null;
+  if (input.expiresAt !== undefined)   next.expiresAt   = input.expiresAt   ? new Date(input.expiresAt)   : null;
+  if (input.campaignId !== undefined) {
+    await prepareCampaignLink(shopId, input.campaignId, id);
+    next.campaignId = input.campaignId || null;
+  }
   if (input.activate !== undefined)    next.active      = !!input.activate;
 
   return prisma.qrCode.update({ where: { id }, data: next });
 }
 
 export async function setActive(shopId: string, id: string, active: boolean) {
+  const qr = await prisma.qrCode.findFirst({ where: { id, shopId } });
+  if (!qr) throw new Error("QR code not found");
+  await prisma.qrCode.update({ where: { id }, data: { active } });
+}
+
+export async function deactivateExpiredQrs(shopId: string) {
+  await prisma.qrCode.updateMany({
+    where: {
+      shopId,
+      active: true,
+      archivedAt: null,
+      expiresAt: { lte: new Date() },
+    },
+    data: { active: false },
+  });
+}
+
+export async function deactivateQrById(id: string) {
   await prisma.qrCode.update({
     where: { id },
-    data: { active },
+    data: { active: false },
   });
 }
 
@@ -167,6 +213,9 @@ export async function duplicateQr(shop: ShopWithPlan, id: string) {
           utmCampaign: source.utmCampaign,
           utmSource: source.utmSource,
           utmMedium: source.utmMedium,
+          utmTerm: source.utmTerm,
+          activatesAt: source.activatesAt,
+          expiresAt: source.expiresAt,
           active: false,
         },
       });
@@ -191,6 +240,8 @@ export interface QrListItem {
   createdAt: Date;
   scans: number;
   conversions: number;
+  activatesAt: Date | null;
+  expiresAt: Date | null;
 }
 
 export interface QrListFilters {
@@ -201,6 +252,8 @@ export interface QrListFilters {
 }
 
 export async function listQrCodes(shopId: string, filters: QrListFilters = {}): Promise<QrListItem[]> {
+  await deactivateExpiredQrs(shopId);
+
   const where: Record<string, unknown> = { shopId, archivedAt: null };
   if (filters.query)  where.name = { contains: filters.query, mode: "insensitive" };
   if (filters.type && filters.type !== "all")    where.type   = filters.type;
@@ -219,7 +272,7 @@ export async function listQrCodes(shopId: string, filters: QrListFilters = {}): 
       { createdAt: "desc" },
   });
 
-  let items: QrListItem[] = rows.map(r => ({
+  const items: QrListItem[] = rows.map(r => ({
     id: r.id,
     slug: r.slug,
     name: r.name,
@@ -230,6 +283,8 @@ export async function listQrCodes(shopId: string, filters: QrListFilters = {}): 
     label:  (r.label  as QrLabel)  ?? {},
     active: r.active,
     createdAt: r.createdAt,
+    activatesAt: r.activatesAt,
+    expiresAt: r.expiresAt,
     scans: r._count.scans,
     conversions: r.scans.filter(s => s.conversion).length,
   }));
@@ -246,5 +301,30 @@ export async function getQrBySlug(slug: string) {
     // Eagerly include the linked campaign so the scan endpoint can redirect
     // straight to the campaign landing page when set.
     include: { shop: true, campaign: true },
+  });
+}
+
+export async function getQrForEdit(shopId: string, id: string) {
+  return prisma.qrCode.findFirst({
+    where: { id, shopId, archivedAt: null },
+    select: {
+      id: true,
+      slug: true,
+      name: true,
+      description: true,
+      type: true,
+      target: true,
+      shopifyRef: true,
+      design: true,
+      label: true,
+      utmCampaign: true,
+      utmSource: true,
+      utmMedium: true,
+      utmTerm: true,
+      activatesAt: true,
+      expiresAt: true,
+      campaignId: true,
+      active: true,
+    },
   });
 }

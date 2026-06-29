@@ -10,7 +10,7 @@ export const loader = async ({ params }: LoaderFunctionArgs) => {
   ]);
   const campaign = await prisma.campaign.findUnique({
     where: { id: params.id },
-    include: { shop: true },
+    include: { shop: { include: { activeSubscription: true } } },
   });
   if (!campaign) throw new Response("Not found", { status: 404 });
   return campaignLandingData(campaign, true);

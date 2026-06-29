@@ -1,5 +1,5 @@
-import React, { useEffect, useRef, useState } from "react";
-import { Outlet, useNavigation } from "react-router";
+import { useEffect, useRef, useState } from "react";
+import { Outlet, useLocation, useNavigation } from "react-router";
 import { Sidebar } from "./Sidebar";
 import { ToastProvider } from "../ui/Toast";
 import { TweaksPanel, TweakValues, TWEAK_DEFAULTS } from "../ui/TweaksPanel";
@@ -55,8 +55,10 @@ function loadTweaks(): TweakValues {
 
 export function AppShell() {
   const navigation = useNavigation();
+  const location = useLocation();
   const isNavigating = navigation.state !== "idle";
   const appRef = useRef<HTMLDivElement>(null);
+  const isCampaignEditor = /^\/app\/campaigns\/[^/]+\/edit\/?$/.test(location.pathname);
 
   const [tweaks, setTweaks] = useState<TweakValues>(loadTweaks);
 
@@ -87,7 +89,7 @@ export function AppShell() {
       {/* Navigation progress bar */}
       <div className={`toploader ${isNavigating ? "active" : ""}`} />
 
-      <div ref={appRef} className="tqr-app">
+      <div ref={appRef} className={`tqr-app ${isCampaignEditor ? "tqr-app-editor" : ""}`}>
         <Sidebar
           theme={tweaks.theme}
           onTheme={t => handleTweak("theme", t)}

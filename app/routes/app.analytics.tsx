@@ -3,6 +3,7 @@ import { useState } from "react";
 import { useLoaderData, useSearchParams } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { requireShop } from "../lib/shop.server";
+import { getPlanEntitlements } from "../lib/plan.server";
 import {
   getKpis, getDailySeries, getDeviceBreakdown, getCountryBreakdown,
   getTopQrCodes, getRecentScans, type PeriodKey,
@@ -13,22 +14,40 @@ import { Badge } from "../components/ui/Badge";
 import { Card, CardHead } from "../components/ui/Card";
 import { StatCard } from "../components/ui/StatCard";
 import { Select } from "../components/ui/Input";
+import { useToast } from "../components/ui/Toast";
+import { downloadFile } from "../lib/download.client";
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { shop } = await requireShop(request);
   const url = new URL(request.url);
   const period = (url.searchParams.get("period") as PeriodKey) || "14d";
+  const entitlements = await getPlanEntitlements(shop);
+  const access = {
+    earliestScanDate: entitlements.earliestScanDate,
+    attribution: entitlements.attribution,
+  };
 
   const [kpis, series, devices, countries, topQr, recentScans] = await Promise.all([
-    getKpis(shop.id, period),
-    getDailySeries(shop.id, period),
-    getDeviceBreakdown(shop.id, period),
-    getCountryBreakdown(shop.id, period),
-    getTopQrCodes(shop.id, period, 5),
-    getRecentScans(shop.id, 10),
+    getKpis(shop.id, period, access),
+    getDailySeries(shop.id, period, access),
+    getDeviceBreakdown(shop.id, period, access),
+    getCountryBreakdown(shop.id, period, 8, access),
+    getTopQrCodes(shop.id, period, 5, access),
+    getRecentScans(shop.id, 10, access),
   ]);
 
-  return { period, kpis, series, devices, countries, topQr, recentScans };
+  return {
+    period,
+    kpis,
+    series,
+    devices,
+    countries,
+    topQr,
+    recentScans,
+    shopDomain: shop.domain,
+    canAttribution: entitlements.attribution,
+    historyDays: entitlements.historyDays,
+  };
 };
 
 function AreaChart({ data, height = 200, accent = "var(--accent)" }: { data: number[]; height?: number; accent?: string }) {
@@ -83,6 +102,17 @@ const DEVICE_LABEL: Record<string, { name: string; icon: string }> = {
   UNKNOWN: { name: "Unknown", icon: "help-circle" },
 };
 
+function embeddedResourceHref(path: string, searchParams: URLSearchParams, params: Record<string, string>, fallbackShop?: string) {
+  const next = new URLSearchParams();
+  const shop = searchParams.get("shop") || fallbackShop;
+  const host = searchParams.get("host");
+  if (shop) next.set("shop", shop);
+  if (host) next.set("host", host);
+  Object.entries(params).forEach(([key, value]) => next.set(key, value));
+  const query = next.toString();
+  return query ? `${path}?${query}` : path;
+}
+
 function countryFlag(code: string): string {
   if (!code || code.length !== 2) return "🌐";
   // 0x1F1E6 = Regional Indicator A
@@ -91,11 +121,41 @@ function countryFlag(code: string): string {
 
 export default function Analytics() {
   const data = useLoaderData<typeof loader>();
+  const toast = useToast();
   const [searchParams, setSearchParams] = useSearchParams();
   const [series, setSeries] = useState<"scans" | "conv">("scans");
+  const [exporting, setExporting] = useState(false);
 
   const scanData = data.series.map(s => s.scans);
   const convData = data.series.map(s => s.conversions);
+  const conversionLabel = data.canAttribution ? "Conversions" : "Conversions locked";
+  const scansExportHref = embeddedResourceHref("/qr/scans.csv", searchParams, { period: data.period }, data.shopDomain);
+
+  const updatePeriod = (period: string) => {
+    const next = new URLSearchParams(searchParams);
+    next.set("period", period);
+    setSearchParams(next);
+  };
+
+  const exportScans = async () => {
+    setExporting(true);
+    try {
+      await downloadFile(scansExportHref, `trackqr-scans-${data.period}.csv`);
+      toast({ title: "Export downloaded", type: "info" });
+    } catch (err) {
+      toast({ type: "error", title: "Export failed", desc: err instanceof Error ? err.message : "Try again." });
+    } finally {
+      setExporting(false);
+    }
+  };
+
+  const showConversions = () => {
+    if (data.canAttribution) {
+      setSeries("conv");
+      return;
+    }
+    toast({ type: "info", title: "Conversions locked", desc: "Upgrade to a plan with attribution to view conversion data." });
+  };
 
   return (
     <>
@@ -103,29 +163,31 @@ export default function Analytics() {
         <div className="page-head-left">
           <div className="page-eyebrow"><Icon name="bar-chart" size={11} /> Analytics</div>
           <h1 className="page-h1"><span className="em">Scan</span> analytics</h1>
-          <div className="page-sub">Scans by day, device, geography and conversion funnel — all in one view.</div>
+          <div className="page-sub">
+            Scans by day, device and geography{data.canAttribution ? " with conversion attribution" : ""} — limited to {data.historyDays ? `${data.historyDays} days` : "full history"} on your plan.
+          </div>
         </div>
         <div className="page-head-actions">
           <Select
             value={data.period}
-            onChange={e => setSearchParams(prev => { prev.set("period", e.target.value); return prev; })}
+            onChange={e => updatePeriod(e.target.value)}
             style={{ height: 34, width: 130 }}>
             <option value="7d">Last 7 days</option>
             <option value="14d">Last 14 days</option>
             <option value="30d">Last 30 days</option>
             <option value="90d">Last 90 days</option>
           </Select>
-          <a href={`/qr/scans.csv?period=${data.period}`} target="_blank" rel="noopener noreferrer" style={{ textDecoration: "none" }}>
-            <Button variant="secondary" icon="download">Export</Button>
-          </a>
+          <Button variant="secondary" icon="download" onClick={exportScans} disabled={exporting}>
+            {exporting ? "Exporting..." : "Export"}
+          </Button>
         </div>
       </div>
 
       {/* KPIs */}
       <div className="grid grid-4">
         <StatCard accent="blue"   label="Total scans"     value={fmtNum(data.kpis.totalScans)}        icon="scan"        sparklineData={scanData} sub={`${data.series.length}-day window`} />
-        <StatCard accent="green"  label="Conversions"     value={fmtNum(data.kpis.totalConversions)} icon="trending-up" sparklineData={convData} />
-        <StatCard accent="violet" label="Conv. rate"      value={data.kpis.convRate.toFixed(2) + "%"} icon="zap" />
+        <StatCard accent="green"  label={conversionLabel} value={data.canAttribution ? fmtNum(data.kpis.totalConversions) : "Growth"} icon="trending-up" sparklineData={data.canAttribution ? convData : undefined} />
+        <StatCard accent="violet" label="Conv. rate"      value={data.canAttribution ? data.kpis.convRate.toFixed(2) + "%" : "Growth"} icon="zap" />
         <StatCard accent="amber"  label="Unique visitors" value={fmtNum(data.kpis.uniqueVisitors)}    icon="users"       sub="by session token" />
       </div>
 
@@ -138,7 +200,7 @@ export default function Analytics() {
             actions={
               <div className="segmented">
                 <button className={series === "scans" ? "active" : ""} onClick={() => setSeries("scans")}>Scans</button>
-                <button className={series === "conv"  ? "active" : ""} onClick={() => setSeries("conv")}>Conv.</button>
+                <button className={series === "conv"  ? "active" : ""} onClick={showConversions} title={data.canAttribution ? "Show conversions" : "Conversions require attribution"}>Conv.</button>
               </div>
             }
           />
@@ -205,21 +267,23 @@ export default function Analytics() {
               <tr>
                 <th>Name</th>
                 <th className="right">Scans</th>
-                <th className="right">Conv.</th>
-                <th className="right">Rate</th>
+                {data.canAttribution && <th className="right">Conv.</th>}
+                {data.canAttribution && <th className="right">Rate</th>}
               </tr>
             </thead>
             <tbody>
               {data.topQr.length === 0 ? (
-                <tr><td colSpan={4} style={{ textAlign: "center", padding: "20px", color: "var(--fg-muted)" }}>No QR codes yet</td></tr>
+                <tr><td colSpan={data.canAttribution ? 4 : 2} style={{ textAlign: "center", padding: "20px", color: "var(--fg-muted)" }}>No QR codes yet</td></tr>
               ) : data.topQr.map(qr => (
                 <tr key={qr.id}>
                   <td style={{ fontWeight: 500, color: "var(--fg-strong)" }}>{qr.name}</td>
                   <td className="num right">{fmtNum(qr.scans)}</td>
-                  <td className="num right">{fmtNum(qr.conversions)}</td>
-                  <td className="num right">
-                    <Badge tone={qr.rate > 10 ? "success" : "brand"}>{qr.rate.toFixed(1)}%</Badge>
-                  </td>
+                  {data.canAttribution && <td className="num right">{fmtNum(qr.conversions)}</td>}
+                  {data.canAttribution && (
+                    <td className="num right">
+                      <Badge tone={qr.rate > 10 ? "success" : "brand"}>{qr.rate.toFixed(1)}%</Badge>
+                    </td>
+                  )}
                 </tr>
               ))}
             </tbody>
@@ -231,9 +295,9 @@ export default function Analytics() {
       <Card className="mt-6">
         <CardHead title="Recent scans" subtitle="Latest individual scan events"
           actions={
-            <a href={`/qr/scans.csv?period=${data.period}`} target="_blank" rel="noopener noreferrer" style={{ textDecoration: "none" }}>
-              <Button size="sm" variant="ghost" icon="download">Export</Button>
-            </a>
+            <Button size="sm" variant="ghost" icon="download" onClick={exportScans} disabled={exporting}>
+              {exporting ? "Exporting..." : "Export"}
+            </Button>
           }
         />
         <div style={{ overflowX: "auto" }}>
@@ -244,12 +308,12 @@ export default function Analytics() {
                 <th>Location</th>
                 <th>Device</th>
                 <th>Time</th>
-                <th>Converted</th>
+                {data.canAttribution && <th>Converted</th>}
               </tr>
             </thead>
             <tbody>
               {data.recentScans.length === 0 ? (
-                <tr><td colSpan={5} style={{ textAlign: "center", padding: "24px", color: "var(--fg-muted)" }}>No scans yet.</td></tr>
+                <tr><td colSpan={data.canAttribution ? 5 : 4} style={{ textAlign: "center", padding: "24px", color: "var(--fg-muted)" }}>No scans yet.</td></tr>
               ) : data.recentScans.map(s => {
                 const meta = DEVICE_LABEL[s.device];
                 return (
@@ -267,7 +331,7 @@ export default function Analytics() {
                     <td style={{ fontFamily: "var(--ff-mono)", fontSize: 12, color: "var(--fg-muted)" }}>
                       {fmtRel(s.createdAt)}
                     </td>
-                    <td><Badge tone={s.converted ? "success" : "neutral"} dot>{s.converted ? "Yes" : "No"}</Badge></td>
+                    {data.canAttribution && <td><Badge tone={s.converted ? "success" : "neutral"} dot>{s.converted ? "Yes" : "No"}</Badge></td>}
                   </tr>
                 );
               })}

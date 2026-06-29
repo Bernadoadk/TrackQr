@@ -1,10 +1,10 @@
 import type { HeadersFunction, LoaderFunctionArgs, ActionFunctionArgs } from "react-router";
 import { useState } from "react";
-import { useNavigate, useLoaderData, useFetcher } from "react-router";
+import { useNavigate, useLoaderData, useFetcher, useSearchParams } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { requireShop } from "../lib/shop.server";
 import { listCampaigns, createCampaign, setCampaignStatus, deleteCampaign, duplicateCampaign } from "../lib/campaign.server";
-import { QuotaExceededError } from "../lib/plan.server";
+import { getPlanEntitlements, QuotaExceededError } from "../lib/plan.server";
 import type { CampaignStatus } from "@prisma/client";
 import { Icon } from "../components/ui/Icon";
 import { Button } from "../components/ui/Button";
@@ -13,11 +13,21 @@ import { Card } from "../components/ui/Card";
 import { StatCard } from "../components/ui/StatCard";
 import { Field, Input, Textarea } from "../components/ui/Input";
 import { useToast } from "../components/ui/Toast";
+import { ConfirmDialog } from "../components/ui/ConfirmDialog";
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { shop } = await requireShop(request);
-  const items = await listCampaigns(shop.id);
-  return { items };
+  const entitlements = await getPlanEntitlements(shop);
+  const items = await listCampaigns(shop.id, {
+    earliestScanDate: entitlements.earliestScanDate,
+    attribution: entitlements.attribution,
+  });
+  return {
+    items,
+    shopDomain: shop.domain,
+    canAttribution: entitlements.attribution,
+    historyDays: entitlements.historyDays,
+  };
 };
 
 export const action = async ({ request }: ActionFunctionArgs) => {
@@ -84,6 +94,15 @@ function fmtDate(d: Date | string | null) {
   if (!d) return "—";
   return new Date(d).toLocaleDateString("en-US", { month: "short", day: "2-digit", year: "numeric" });
 }
+function embeddedResourceHref(path: string, searchParams: URLSearchParams, fallbackShop?: string) {
+  const next = new URLSearchParams();
+  const shop = searchParams.get("shop") || fallbackShop;
+  const host = searchParams.get("host");
+  if (shop) next.set("shop", shop);
+  if (host) next.set("host", host);
+  const query = next.toString();
+  return query ? `${path}?${query}` : path;
+}
 
 function NewCampaignModal({ onClose, fetcher }: { onClose: () => void; fetcher: ReturnType<typeof useFetcher<typeof action>> }) {
   const [name,  setName]  = useState("");
@@ -137,12 +156,14 @@ function NewCampaignModal({ onClose, fetcher }: { onClose: () => void; fetcher: 
 export default function Campaigns() {
   const navigate = useNavigate();
   const toast    = useToast();
-  const { items } = useLoaderData<typeof loader>();
+  const { items, shopDomain, canAttribution, historyDays } = useLoaderData<typeof loader>();
   const fetcher  = useFetcher<typeof action>();
+  const [searchParams] = useSearchParams();
 
   const [query,  setQuery]  = useState("");
   const [status, setStatus] = useState<string>("all");
   const [showNew, setShowNew] = useState(false);
+  const [campaignToDelete, setCampaignToDelete] = useState<(typeof items)[number] | null>(null);
 
   // After create, navigate to editor
   if (showNew && fetcher.state === "idle" && fetcher.data?.ok && fetcher.data.intent === "create" && fetcher.data.id) {
@@ -188,6 +209,21 @@ export default function Campaigns() {
 
   return (
     <>
+      <ConfirmDialog
+        open={!!campaignToDelete}
+        title="Supprimer cette campagne ?"
+        description={campaignToDelete ? `Cette action supprimera "${campaignToDelete.name}" et les leads associés. Cette opération est définitive.` : ""}
+        confirmLabel="Supprimer"
+        cancelLabel="Annuler"
+        tone="danger"
+        loading={fetcher.state !== "idle"}
+        onClose={() => setCampaignToDelete(null)}
+        onConfirm={() => {
+          if (!campaignToDelete) return;
+          submitIntent("delete", campaignToDelete.id);
+          setCampaignToDelete(null);
+        }}
+      />
       {showNew && <NewCampaignModal onClose={() => setShowNew(false)} fetcher={fetcher} />}
 
       {/* Header */}
@@ -195,7 +231,7 @@ export default function Campaigns() {
         <div className="page-head-left">
           <div className="page-eyebrow"><Icon name="megaphone" size={11} /> {totalActive} running</div>
           <h1 className="page-h1"><span className="em">Campaigns</span></h1>
-          <div className="page-sub">Landing pages built block-by-block, attached to a QR code, tracked end-to-end.</div>
+          <div className="page-sub">Landing pages built block-by-block, attached to a QR code. Scan stats show {historyDays ? `the last ${historyDays} days` : "full history"}.</div>
         </div>
         <div className="page-head-actions">
           <Button variant="primary" icon="plus" onClick={() => setShowNew(true)}>New campaign</Button>
@@ -206,7 +242,7 @@ export default function Campaigns() {
         <StatCard accent="green"  label="Active"       value={totalActive}      icon="play"     sub={`of ${items.length} total`} />
         <StatCard accent="violet" label="Total leads"  value={fmt(totalLeads)}  icon="mail" />
         <StatCard accent="blue"   label="Total scans"  value={fmt(totalScans)}  icon="scan" />
-        <StatCard accent="amber"  label="Conversions"  value={fmt(totalConv)}   icon="zap" />
+        <StatCard accent="amber"  label={canAttribution ? "Conversions" : "Conversions locked"} value={canAttribution ? fmt(totalConv) : "Growth"} icon="zap" />
       </div>
 
       <div className="toolbar mb-4">
@@ -273,7 +309,9 @@ export default function Campaigns() {
                   <div><Icon name="calendar" size={11} style={{ verticalAlign: "-1px", marginRight: 4 }} />{fmtDate(c.startAt)} → {fmtDate(c.endAt)}</div>
                   <div><Icon name="scan" size={11} style={{ verticalAlign: "-1px", marginRight: 4 }} /><span className="num strong">{fmt(c.scans)}</span> scans</div>
                   <div><Icon name="mail" size={11} style={{ verticalAlign: "-1px", marginRight: 4 }} /><span className="num strong">{fmt(c.leads)}</span> leads</div>
-                  <div><Icon name="trending-up" size={11} style={{ verticalAlign: "-1px", marginRight: 4 }} /><span className="num strong">{c.convRate.toFixed(2)}%</span> conv.</div>
+                  {canAttribution && (
+                    <div><Icon name="trending-up" size={11} style={{ verticalAlign: "-1px", marginRight: 4 }} /><span className="num strong">{c.convRate.toFixed(2)}%</span> conv.</div>
+                  )}
                 </div>
               </div>
 
@@ -301,15 +339,14 @@ export default function Campaigns() {
                     <Icon name="play" size={13} />
                   </Button>
                 )}
-                <a href={`/c/${c.slug}/leads.csv`} target="_blank" rel="noopener noreferrer">
+                <a href={embeddedResourceHref(`/c/${c.slug}/leads.csv`, searchParams, shopDomain)} target="_blank" rel="noopener noreferrer">
                   <Button variant="ghost" size="sm"><Icon name="download" size={13} /></Button>
                 </a>
                 <Button variant="ghost" size="sm" onClick={() => submitIntent("duplicate", c.id)}>
                   <Icon name="copy" size={13} />
                 </Button>
                 <Button variant="ghost" size="sm" onClick={() => {
-                  if (!confirm(`Delete "${c.name}"?`)) return;
-                  submitIntent("delete", c.id);
+                  setCampaignToDelete(c);
                 }}>
                   <Icon name="trash" size={13} />
                 </Button>

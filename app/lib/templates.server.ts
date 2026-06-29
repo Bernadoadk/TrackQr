@@ -3,6 +3,7 @@
  * creating new QR codes. Light wrapper over Prisma.
  */
 import prisma from "../db.server";
+import { Prisma } from "@prisma/client";
 
 export interface QrTemplateInput {
   name: string;
@@ -25,8 +26,8 @@ export async function createTemplate(shopId: string, input: QrTemplateInput) {
     data: {
       shopId,
       name,
-      design: input.design,
-      label:  input.label,
+      design: input.design as Prisma.InputJsonValue,
+      label:  input.label as Prisma.InputJsonValue,
     },
   });
 }

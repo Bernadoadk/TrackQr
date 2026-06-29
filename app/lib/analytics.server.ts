@@ -1,15 +1,29 @@
 import prisma from "../db.server";
 import { Prisma, type DeviceType, type QrType } from "@prisma/client";
+import { applyHistoryLimit, type PlanEntitlements } from "./plan.server";
 
 export type PeriodKey = "7d" | "14d" | "30d" | "90d";
 
 const PERIOD_DAYS: Record<PeriodKey, number> = { "7d": 7, "14d": 14, "30d": 30, "90d": 90 };
+type AnalyticsAccess = Pick<PlanEntitlements, "earliestScanDate" | "attribution">;
+
+const DEFAULT_ACCESS: AnalyticsAccess = {
+  earliestScanDate: null,
+  attribution: true,
+};
 
 export function periodRange(period: PeriodKey): { from: Date; to: Date; days: number } {
   const days = PERIOD_DAYS[period] ?? 14;
   const to = new Date();
   const from = new Date(to.getTime() - days * 86400000);
   return { from, to, days };
+}
+
+export function limitedPeriodRange(period: PeriodKey, access: Partial<AnalyticsAccess> = {}): { from: Date; to: Date; days: number } {
+  const base = periodRange(period);
+  const from = applyHistoryLimit(base.from, access.earliestScanDate ?? null);
+  const days = Math.max(1, Math.ceil((base.to.getTime() - from.getTime()) / 86400000));
+  return { ...base, from, days };
 }
 
 export interface KpiSnapshot {
@@ -19,12 +33,15 @@ export interface KpiSnapshot {
   convRate: number; // percent
 }
 
-export async function getKpis(shopId: string, period: PeriodKey): Promise<KpiSnapshot> {
-  const { from } = periodRange(period);
+export async function getKpis(shopId: string, period: PeriodKey, accessInput: Partial<AnalyticsAccess> = {}): Promise<KpiSnapshot> {
+  const access = { ...DEFAULT_ACCESS, ...accessInput };
+  const { from } = limitedPeriodRange(period, access);
 
   const [scanCount, convCount, uniq] = await Promise.all([
     prisma.scan.count({ where: { qrCode: { shopId }, createdAt: { gte: from } } }),
-    prisma.conversion.count({ where: { scan: { qrCode: { shopId }, createdAt: { gte: from } } } }),
+    access.attribution
+      ? prisma.conversion.count({ where: { scan: { qrCode: { shopId }, createdAt: { gte: from } } } })
+      : Promise.resolve(0),
     prisma.scan.groupBy({
       by: ["sessionToken"],
       where: { qrCode: { shopId }, createdAt: { gte: from }, sessionToken: { not: null } },
@@ -41,8 +58,9 @@ export async function getKpis(shopId: string, period: PeriodKey): Promise<KpiSna
 
 export interface SeriesPoint { date: string; scans: number; conversions: number; }
 
-export async function getDailySeries(shopId: string, period: PeriodKey): Promise<SeriesPoint[]> {
-  const { from, days } = periodRange(period);
+export async function getDailySeries(shopId: string, period: PeriodKey, accessInput: Partial<AnalyticsAccess> = {}): Promise<SeriesPoint[]> {
+  const access = { ...DEFAULT_ACCESS, ...accessInput };
+  const { from, days } = limitedPeriodRange(period, access);
   // Initialize the empty buckets so zero-traffic days still appear.
   const buckets = new Map<string, SeriesPoint>();
   for (let i = days - 1; i >= 0; i--) {
@@ -57,7 +75,7 @@ export async function getDailySeries(shopId: string, period: PeriodKey): Promise
     SELECT
       date_trunc('day', s."createdAt")::date AS day,
       COUNT(*)::bigint                       AS scans,
-      COUNT(c."id")::bigint                  AS conversions
+      ${access.attribution ? Prisma.sql`COUNT(c."id")::bigint` : Prisma.sql`0::bigint`} AS conversions
     FROM "Scan" s
     JOIN "QrCode" q ON q."id" = s."qrCodeId"
     LEFT JOIN "Conversion" c ON c."scanId" = s."id"
@@ -79,8 +97,8 @@ export async function getDailySeries(shopId: string, period: PeriodKey): Promise
 
 export interface DeviceBreakdown { device: DeviceType; scans: number; pct: number; }
 
-export async function getDeviceBreakdown(shopId: string, period: PeriodKey): Promise<DeviceBreakdown[]> {
-  const { from } = periodRange(period);
+export async function getDeviceBreakdown(shopId: string, period: PeriodKey, access: Partial<AnalyticsAccess> = {}): Promise<DeviceBreakdown[]> {
+  const { from } = limitedPeriodRange(period, access);
   const rows = await prisma.scan.groupBy({
     by: ["device"],
     where: { qrCode: { shopId }, createdAt: { gte: from } },
@@ -94,8 +112,8 @@ export async function getDeviceBreakdown(shopId: string, period: PeriodKey): Pro
 
 export interface CountryBreakdown { country: string; scans: number; pct: number; }
 
-export async function getCountryBreakdown(shopId: string, period: PeriodKey, limit = 8): Promise<CountryBreakdown[]> {
-  const { from } = periodRange(period);
+export async function getCountryBreakdown(shopId: string, period: PeriodKey, limit = 8, access: Partial<AnalyticsAccess> = {}): Promise<CountryBreakdown[]> {
+  const { from } = limitedPeriodRange(period, access);
   const rows = await prisma.scan.groupBy({
     by: ["country"],
     where: { qrCode: { shopId }, createdAt: { gte: from }, country: { not: null } },
@@ -113,8 +131,9 @@ export async function getCountryBreakdown(shopId: string, period: PeriodKey, lim
 
 export interface TopQr { id: string; name: string; type: QrType; scans: number; conversions: number; rate: number; }
 
-export async function getTopQrCodes(shopId: string, period: PeriodKey, limit = 5): Promise<TopQr[]> {
-  const { from } = periodRange(period);
+export async function getTopQrCodes(shopId: string, period: PeriodKey, limit = 5, accessInput: Partial<AnalyticsAccess> = {}): Promise<TopQr[]> {
+  const access = { ...DEFAULT_ACCESS, ...accessInput };
+  const { from } = limitedPeriodRange(period, access);
   type Row = { id: string; name: string; type: QrType; scans: bigint; conversions: bigint };
   const rows = await prisma.$queryRaw<Row[]>(Prisma.sql`
     SELECT
@@ -122,7 +141,7 @@ export async function getTopQrCodes(shopId: string, period: PeriodKey, limit = 5
       q."name"              AS name,
       q."type"              AS type,
       COUNT(s."id")::bigint AS scans,
-      COUNT(c."id")::bigint AS conversions
+      ${access.attribution ? Prisma.sql`COUNT(c."id")::bigint` : Prisma.sql`0::bigint`} AS conversions
     FROM "QrCode" q
     LEFT JOIN "Scan" s ON s."qrCodeId" = q."id" AND s."createdAt" >= ${from}
     LEFT JOIN "Conversion" c ON c."scanId" = s."id"
@@ -151,9 +170,13 @@ export interface RecentScanRow {
   converted: boolean;
 }
 
-export async function getRecentScans(shopId: string, limit = 12): Promise<RecentScanRow[]> {
+export async function getRecentScans(shopId: string, limit = 12, accessInput: Partial<AnalyticsAccess> = {}): Promise<RecentScanRow[]> {
+  const access = { ...DEFAULT_ACCESS, ...accessInput };
   const rows = await prisma.scan.findMany({
-    where: { qrCode: { shopId } },
+    where: {
+      qrCode: { shopId },
+      ...(access.earliestScanDate ? { createdAt: { gte: access.earliestScanDate } } : {}),
+    },
     orderBy: { createdAt: "desc" },
     take: limit,
     select: {
@@ -168,7 +191,7 @@ export async function getRecentScans(shopId: string, limit = 12): Promise<Recent
     country: r.country,
     device: r.device,
     createdAt: r.createdAt,
-    converted: !!r.conversion,
+      converted: access.attribution && !!r.conversion,
   }));
 }
 
@@ -181,20 +204,31 @@ export interface ActivityItem {
   tone: "green" | "blue" | "violet" | "amber";
 }
 
-export async function getActivityFeed(shopId: string, limit = 6): Promise<ActivityItem[]> {
+export async function getActivityFeed(shopId: string, limit = 6, accessInput: Partial<AnalyticsAccess> = {}): Promise<ActivityItem[]> {
+  const access = { ...DEFAULT_ACCESS, ...accessInput };
   const [scans, conversions, creates] = await Promise.all([
     prisma.scan.findMany({
-      where: { qrCode: { shopId } },
+      where: {
+        qrCode: { shopId },
+        ...(access.earliestScanDate ? { createdAt: { gte: access.earliestScanDate } } : {}),
+      },
       orderBy: { createdAt: "desc" },
       take: limit,
       select: { id: true, createdAt: true, country: true, qrCode: { select: { name: true } } },
     }),
-    prisma.conversion.findMany({
-      where: { scan: { qrCode: { shopId } } },
-      orderBy: { attributedAt: "desc" },
-      take: limit,
-      select: { id: true, attributedAt: true, orderName: true, scan: { select: { qrCode: { select: { name: true } } } } },
-    }),
+    access.attribution
+      ? prisma.conversion.findMany({
+          where: {
+            scan: {
+              qrCode: { shopId },
+              ...(access.earliestScanDate ? { createdAt: { gte: access.earliestScanDate } } : {}),
+            },
+          },
+          orderBy: { attributedAt: "desc" },
+          take: limit,
+          select: { id: true, attributedAt: true, orderName: true, scan: { select: { qrCode: { select: { name: true } } } } },
+        })
+      : Promise.resolve([]),
     prisma.qrCode.findMany({
       where: { shopId },
       orderBy: { createdAt: "desc" },
@@ -234,20 +268,23 @@ export async function getActivityFeed(shopId: string, limit = 6): Promise<Activi
 }
 
 /** Dashboard one-shot loader payload — used by app._index loader. */
-export async function getDashboardData(shopId: string) {
+export async function getDashboardData(shopId: string, accessInput: Partial<AnalyticsAccess> = {}) {
+  const access = { ...DEFAULT_ACCESS, ...accessInput };
   const [qrCodes, kpis14, series, activity] = await Promise.all([
     prisma.qrCode.findMany({
       where: { shopId, archivedAt: null },
       orderBy: { createdAt: "desc" },
       take: 5,
       include: {
-        _count: { select: { scans: true } },
-        scans:  { select: { id: true, conversion: { select: { id: true } } } },
+        scans:  {
+          where: access.earliestScanDate ? { createdAt: { gte: access.earliestScanDate } } : undefined,
+          select: { id: true, conversion: { select: { id: true } } },
+        },
       },
     }),
-    getKpis(shopId, "14d"),
-    getDailySeries(shopId, "14d"),
-    getActivityFeed(shopId, 6),
+    getKpis(shopId, "14d", access),
+    getDailySeries(shopId, "14d", access),
+    getActivityFeed(shopId, 6, access),
   ]);
 
   const totals = await prisma.qrCode.aggregate({
@@ -263,8 +300,8 @@ export async function getDashboardData(shopId: string) {
     recent: qrCodes.map(q => ({
       id: q.id, slug: q.slug, name: q.name, type: q.type,
       active: q.active, createdAt: q.createdAt,
-      scans: q._count.scans,
-      conversions: q.scans.filter(s => s.conversion).length,
+      scans: q.scans.length,
+      conversions: access.attribution ? q.scans.filter(s => s.conversion).length : 0,
     })),
   };
 }

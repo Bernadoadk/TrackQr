@@ -8,7 +8,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   const shopRow = await getShopByDomain(shop);
   if (!shopRow) return new Response();
   try {
-    await attributeOrder(shopRow.id, payload as Parameters<typeof attributeOrder>[1]);
+    await attributeOrder(shopRow, payload as Parameters<typeof attributeOrder>[1]);
   } catch (err) {
     console.error(`[webhook] ${topic} attribution failed`, err);
   }

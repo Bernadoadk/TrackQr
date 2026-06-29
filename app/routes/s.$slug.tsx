@@ -2,6 +2,7 @@ import type { LoaderFunctionArgs } from "react-router";
 import { deactivateQrById, getQrBySlug } from "../lib/qr-crud.server";
 import { buildRedirectTarget } from "../lib/qr.server";
 import { parseRequest, recordScan } from "../lib/tracking.server";
+import { isShopAccessActive, pauseShopPublicSurfaces } from "../lib/plan.server";
 
 /**
  * Public scan endpoint. Every TrackQr QR encodes a URL pointing here.
@@ -16,6 +17,10 @@ export const loader = async ({ params, request }: LoaderFunctionArgs) => {
   const qr = await getQrBySlug(slug);
   if (!qr || qr.archivedAt) {
     return errorPage("This QR code has been removed.", 410);
+  }
+  if (!(await isShopAccessActive(qr.shop))) {
+    await pauseShopPublicSurfaces(qr.shopId);
+    return errorPage("This QR code is unavailable until the merchant reactivates TrackQr billing.", 402);
   }
   if (!qr.active) {
     return errorPage("This QR code is currently paused.", 423);

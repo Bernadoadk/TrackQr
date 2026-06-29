@@ -1,6 +1,6 @@
 import prisma from "../db.server";
 import { z } from "zod";
-import type { Campaign, CampaignStatus } from "@prisma/client";
+import type { Campaign, CampaignStatus, Prisma } from "@prisma/client";
 import { shortSlug, nameToSlug } from "./slug.server";
 import { assertQuota, type ShopWithPlan } from "./plan.server";
 
@@ -31,6 +31,7 @@ export async function createCampaign(shop: ShopWithPlan, input: CreateCampaignIn
           endAt:   parsed.endAt   ? new Date(parsed.endAt)   : null,
           status: "DRAFT",
           blocks: [],
+          settings: {},
         },
       });
     } catch (e: unknown) {
@@ -41,11 +42,14 @@ export async function createCampaign(shop: ShopWithPlan, input: CreateCampaignIn
   throw new Error("Could not create campaign");
 }
 
-export async function saveBlocks(shopId: string, id: string, blocks: unknown[], name?: string) {
+export async function saveBlocks(shopId: string, id: string, blocks: unknown[], name?: string, settings?: unknown) {
   const campaign = await prisma.campaign.findFirst({ where: { id, shopId } });
   if (!campaign) throw new Error("Campaign not found");
-  const data: Record<string, unknown> = { blocks };
+  const data: Prisma.CampaignUpdateInput = { blocks: blocks as Prisma.InputJsonValue };
   if (typeof name === "string" && name.trim()) data.name = name.trim();
+  if (settings && typeof settings === "object" && !Array.isArray(settings)) {
+    data.settings = settings as Prisma.InputJsonValue;
+  }
   return prisma.campaign.update({ where: { id }, data });
 }
 
@@ -67,7 +71,13 @@ export async function duplicateCampaign(shop: ShopWithPlan, id: string) {
     name: `${source.name} (copy)`,
     description: source.description,
   }).then(async created => {
-    await prisma.campaign.update({ where: { id: created.id }, data: { blocks: source.blocks as object[] } });
+    await prisma.campaign.update({
+      where: { id: created.id },
+      data: {
+        blocks: source.blocks as Prisma.InputJsonValue,
+        settings: source.settings as Prisma.InputJsonValue,
+      },
+    });
     return created;
   });
 }
@@ -87,23 +97,30 @@ export interface CampaignListItem {
   convRate: number;
 }
 
-export async function listCampaigns(shopId: string): Promise<CampaignListItem[]> {
+export interface CampaignListAccess {
+  earliestScanDate?: Date | null;
+  attribution?: boolean;
+}
+
+export async function listCampaigns(shopId: string, access: CampaignListAccess = {}): Promise<CampaignListItem[]> {
   const rows = await prisma.campaign.findMany({
     where: { shopId },
     orderBy: { createdAt: "desc" },
     include: {
       qrCode: {
         select: {
-          _count: { select: { scans: true } },
-          scans: { select: { id: true, conversion: { select: { id: true } } } },
+          scans: {
+            where: access.earliestScanDate ? { createdAt: { gte: access.earliestScanDate } } : undefined,
+            select: { id: true, conversion: { select: { id: true } } },
+          },
         },
       },
       _count: { select: { leads: true } },
     },
   });
   return rows.map(c => {
-    const scans = c.qrCode?._count.scans ?? 0;
-    const conversions = c.qrCode?.scans.filter(s => s.conversion).length ?? 0;
+    const scans = c.qrCode?.scans.length ?? 0;
+    const conversions = access.attribution === false ? 0 : c.qrCode?.scans.filter(s => s.conversion).length ?? 0;
     return {
       id: c.id,
       slug: c.slug,
@@ -133,7 +150,10 @@ export async function getCampaign(shopId: string, id: string) {
 }
 
 export async function getCampaignBySlug(slug: string) {
-  return prisma.campaign.findUnique({ where: { slug }, include: { shop: true } });
+  return prisma.campaign.findUnique({
+    where: { slug },
+    include: { shop: { include: { activeSubscription: { include: { plan: true } } } } },
+  });
 }
 
 export async function listCampaignBlockQrChoices(shopId: string) {

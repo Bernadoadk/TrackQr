@@ -251,7 +251,12 @@ export interface QrListFilters {
   sort?: "recent" | "scans" | "conv" | "name";
 }
 
-export async function listQrCodes(shopId: string, filters: QrListFilters = {}): Promise<QrListItem[]> {
+export interface QrListAccess {
+  earliestScanDate?: Date | null;
+  attribution?: boolean;
+}
+
+export async function listQrCodes(shopId: string, filters: QrListFilters = {}, access: QrListAccess = {}): Promise<QrListItem[]> {
   await deactivateExpiredQrs(shopId);
 
   const where: Record<string, unknown> = { shopId, archivedAt: null };
@@ -263,8 +268,10 @@ export async function listQrCodes(shopId: string, filters: QrListFilters = {}): 
   const rows = await prisma.qrCode.findMany({
     where,
     include: {
-      _count: { select: { scans: true } },
-      scans:  { select: { id: true, conversion: { select: { id: true } } } },
+      scans:  {
+        where: access.earliestScanDate ? { createdAt: { gte: access.earliestScanDate } } : undefined,
+        select: { id: true, conversion: { select: { id: true } } },
+      },
     },
     orderBy:
       filters.sort === "name" ? { name: "asc" } :
@@ -285,8 +292,8 @@ export async function listQrCodes(shopId: string, filters: QrListFilters = {}): 
     createdAt: r.createdAt,
     activatesAt: r.activatesAt,
     expiresAt: r.expiresAt,
-    scans: r._count.scans,
-    conversions: r.scans.filter(s => s.conversion).length,
+    scans: r.scans.length,
+    conversions: access.attribution === false ? 0 : r.scans.filter(s => s.conversion).length,
   }));
 
   if (filters.sort === "scans") items.sort((a, b) => b.scans - a.scans);
@@ -300,7 +307,7 @@ export async function getQrBySlug(slug: string) {
     where: { slug },
     // Eagerly include the linked campaign so the scan endpoint can redirect
     // straight to the campaign landing page when set.
-    include: { shop: true, campaign: true },
+    include: { shop: { include: { activeSubscription: { include: { plan: true } } } }, campaign: true },
   });
 }
 

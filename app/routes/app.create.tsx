@@ -215,10 +215,35 @@ function QrSvg({
   const ref = useRef<HTMLDivElement>(null);
 
   // Resolve the logo to a data/source URL for embedding in the SVG.
-  const logoSrc =
+  const rawLogoSrc =
     logo.kind === "brand"  && logo.brandId   ? logoSvgDataUrl(logo.brandId, 80) :
-    logo.kind === "custom" && logo.customUrl ? logo.customUrl :
+    logo.kind === "custom" && (logo.customPreviewUrl || logo.customUrl) ? (logo.customPreviewUrl || logo.customUrl) :
     "";
+  const [resolvedLogoSrc, setResolvedLogoSrc] = useState(rawLogoSrc);
+
+  useEffect(() => {
+    let cancelled = false;
+    setResolvedLogoSrc(rawLogoSrc);
+    if (!rawLogoSrc || rawLogoSrc.startsWith("data:") || rawLogoSrc.startsWith("blob:")) return;
+
+    fetch(rawLogoSrc)
+      .then(res => res.ok ? res.blob() : Promise.reject(new Error(`Logo image failed: ${res.status}`)))
+      .then(blob => new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result || ""));
+        reader.onerror = () => reject(reader.error);
+        reader.readAsDataURL(blob);
+      }))
+      .then(dataUrl => {
+        if (!cancelled && dataUrl) setResolvedLogoSrc(dataUrl);
+      })
+      .catch(() => {
+        if (!cancelled) setResolvedLogoSrc(rawLogoSrc);
+      });
+
+    return () => { cancelled = true; };
+  }, [rawLogoSrc]);
+
   const logoKind = logo.kind;
   const gradientFrom = gradient?.from;
   const gradientTo = gradient?.to;
@@ -242,7 +267,7 @@ function QrSvg({
     try {
       const svg = renderQrSvgClient(text || "TrackQr placeholder", {
         size, fg, bg, style, cornerStyle, withLogo: logoKind !== "none",
-        logoDataUrl: logoSrc || undefined,
+        logoDataUrl: resolvedLogoSrc || undefined,
         logoSize: logoSizeFrac,
         margin,
         cornerColor,
@@ -267,7 +292,7 @@ function QrSvg({
       console.error("[qr-preview] render failed", err);
     }
   }, [
-    text, size, fg, bg, style, cornerStyle, logoKind, logoSrc, logoSizeFrac, margin, cornerColor,
+    text, size, fg, bg, style, cornerStyle, logoKind, resolvedLogoSrc, logoSizeFrac, margin, cornerColor,
     gradientFrom, gradientTo, gradientAngle,
     hasLabel, labelText, labelPosition, labelFrame, labelFrameColor, labelColor, labelBandColor,
     labelFont, labelSize, labelBold, labelItalic, labelUnderline, labelAlign,

@@ -1,4 +1,5 @@
 import prisma from "../db.server";
+import { resolvePlan, type ShopWithPlan } from "./plan.server";
 
 interface NoteAttribute { name: string; value: string }
 
@@ -22,7 +23,11 @@ interface OrderWebhookPayload {
  *  2) Fallback: match by session token in the cart's note_attributes
  *     (a separate `tqr_sid` attribute, optional).
  */
-export async function attributeOrder(shopId: string, payload: OrderWebhookPayload): Promise<void> {
+export async function attributeOrder(shop: ShopWithPlan, payload: OrderWebhookPayload): Promise<void> {
+  const plan = await resolvePlan(shop);
+  if (!plan.attribution) return;
+
+  const shopId = shop.id;
   const attrs = new Map<string, string>(
     (payload.note_attributes ?? []).map(a => [a.name, a.value])
   );

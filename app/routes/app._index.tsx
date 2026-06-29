@@ -3,6 +3,7 @@ import { Link, useLoaderData } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { requireShop } from "../lib/shop.server";
 import { getDashboardData } from "../lib/analytics.server";
+import { getPlanEntitlements } from "../lib/plan.server";
 import { QR_TYPE_TO_UI } from "../lib/qr-types";
 import { Icon } from "../components/ui/Icon";
 import { Button } from "../components/ui/Button";
@@ -13,8 +14,17 @@ import { EmptyState } from "../components/ui/EmptyState";
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { shop } = await requireShop(request);
-  const data = await getDashboardData(shop.id);
-  return { shop: { name: shop.name, domain: shop.domain }, ...data };
+  const entitlements = await getPlanEntitlements(shop);
+  const data = await getDashboardData(shop.id, {
+    earliestScanDate: entitlements.earliestScanDate,
+    attribution: entitlements.attribution,
+  });
+  return {
+    shop: { name: shop.name, domain: shop.domain },
+    canAttribution: entitlements.attribution,
+    historyDays: entitlements.historyDays,
+    ...data,
+  };
 };
 
 function fmtNum(n: number) {
@@ -55,7 +65,7 @@ function activityIcon(kind: string) {
 }
 
 export default function Dashboard() {
-  const { shop, counts, kpis, series, activity, recent } = useLoaderData<typeof loader>();
+  const { shop, counts, kpis, series, activity, recent, canAttribution } = useLoaderData<typeof loader>();
   const sparkScans = series.map(s => s.scans);
 
   return (
@@ -65,7 +75,7 @@ export default function Dashboard() {
         <div className="page-head-left">
           <div className="page-eyebrow"><span className="dot" />Welcome back</div>
           <h1 className="page-h1">Good morning, <span className="em">{shop.name ?? "merchant"}</span>.</h1>
-          <div className="page-sub">A pulse on every QR code, campaign and conversion — refreshed every minute.</div>
+          <div className="page-sub">A pulse on every QR code and campaign{canAttribution ? " with conversion attribution" : ""} — refreshed every minute.</div>
         </div>
         <div className="page-head-actions">
           <Link to="/app/analytics"><Button variant="secondary" icon="bar-chart">Analytics</Button></Link>
@@ -77,8 +87,8 @@ export default function Dashboard() {
       <div className="grid grid-4">
         <StatCard accent="blue"   label="QR codes"    value={counts.total}             icon="qr-code"     sub={`${recent.filter(r => r.active).length} active`} />
         <StatCard accent="violet" label="Total scans" value={fmtNum(kpis.totalScans)}  icon="scan"        sub="last 14 days" sparklineData={sparkScans} />
-        <StatCard accent="green"  label="Conversions" value={fmtNum(kpis.totalConversions)} icon="trending-up" sub="last 14 days" />
-        <StatCard accent="amber"  label="Conv. rate"  value={fmtPct(kpis.convRate, 2)} icon="zap"         sub={`${fmtNum(kpis.uniqueVisitors)} unique`} />
+        <StatCard accent="green"  label={canAttribution ? "Conversions" : "Conversions locked"} value={canAttribution ? fmtNum(kpis.totalConversions) : "Growth"} icon="trending-up" sub="last 14 days" />
+        <StatCard accent="amber"  label="Conv. rate"  value={canAttribution ? fmtPct(kpis.convRate, 2) : "Growth"} icon="zap" sub={`${fmtNum(kpis.uniqueVisitors)} unique`} />
       </div>
 
       {/* Recent QRs + Activity */}

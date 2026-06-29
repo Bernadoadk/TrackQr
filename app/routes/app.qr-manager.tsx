@@ -1,11 +1,11 @@
 import type { HeadersFunction, LoaderFunctionArgs, ActionFunctionArgs } from "react-router";
 import { useMemo, useState } from "react";
-import { useLoaderData, useFetcher, useNavigate, Link } from "react-router";
+import { useLoaderData, useFetcher, useNavigate, Link, useSearchParams } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { requireShop } from "../lib/shop.server";
 import { listQrCodes, setActive, deleteQr, duplicateQr, archiveQr } from "../lib/qr-crud.server";
-import { QuotaExceededError } from "../lib/plan.server";
-import { QR_TYPE_TO_UI } from "../lib/qr-types";
+import { getPlanEntitlements, QuotaExceededError } from "../lib/plan.server";
+import { QR_TYPE_FROM_UI, QR_TYPE_TO_UI } from "../lib/qr-types";
 import { Icon } from "../components/ui/Icon";
 import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
@@ -14,23 +14,55 @@ import { StatCard } from "../components/ui/StatCard";
 import { EmptyState } from "../components/ui/EmptyState";
 import { Segmented } from "../components/ui/Segmented";
 import { useToast } from "../components/ui/Toast";
+import { ConfirmDialog } from "../components/ui/ConfirmDialog";
 import { downloadQrAsset, type DownloadFormat } from "../lib/qr-download";
+import { downloadFile } from "../lib/download.client";
 import type { QrType } from "@prisma/client";
+
+function coerceQrTypeFilter(value: string | null): QrType | "all" {
+  if (!value || value === "all") return "all";
+  const normalized = value.toLowerCase();
+  return QR_TYPE_FROM_UI[normalized] ?? "all";
+}
+
+function coerceUiTypeFilter(value: string | null): string {
+  if (!value || value === "all") return "all";
+  const normalized = value.toLowerCase();
+  return QR_TYPE_FROM_UI[normalized] ? normalized : "all";
+}
+
+function coerceStatusFilter(value: string | null): "all" | "active" | "inactive" {
+  return value === "active" || value === "inactive" ? value : "all";
+}
+
+function coerceSort(value: string | null): "recent" | "scans" | "conv" | "name" {
+  return value === "scans" || value === "conv" || value === "name" ? value : "recent";
+}
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { shop } = await requireShop(request);
   const url = new URL(request.url);
+  const entitlements = await getPlanEntitlements(shop);
   const items = await listQrCodes(shop.id, {
     query:  url.searchParams.get("q")      ?? undefined,
-    type:   (url.searchParams.get("type")   as QrType | "all" | null) ?? "all",
-    status: (url.searchParams.get("status") as "all" | "active" | "inactive" | null) ?? "all",
-    sort:   (url.searchParams.get("sort")   as "recent" | "scans" | "conv" | "name" | null) ?? "recent",
+    type:   coerceQrTypeFilter(url.searchParams.get("type")),
+    status: coerceStatusFilter(url.searchParams.get("status")),
+    sort:   coerceSort(url.searchParams.get("sort")),
+  }, {
+    earliestScanDate: entitlements.earliestScanDate,
+    attribution: entitlements.attribution,
   });
 
   // Surface the public scan URL origin so the client can copy it without window hacks.
   const origin = (process.env.SHOPIFY_APP_URL ?? url.origin).replace(/\/$/, "");
 
-  return { items, origin };
+  return {
+    items,
+    origin,
+    shopDomain: shop.domain,
+    canAttribution: entitlements.attribution,
+    historyDays: entitlements.historyDays,
+  };
 };
 
 export const action = async ({ request }: ActionFunctionArgs) => {
@@ -105,19 +137,34 @@ function fmtRel(date: Date | string) {
 function fmtDate(date: Date | string) {
   return new Date(date).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
 }
+function embeddedResourceHref(path: string, searchParams: URLSearchParams, fallbackShop?: string, params: Record<string, string> = {}) {
+  const next = new URLSearchParams();
+  const shop = searchParams.get("shop") || fallbackShop;
+  const host = searchParams.get("host");
+  if (shop) next.set("shop", shop);
+  if (host) next.set("host", host);
+  Object.entries(params).forEach(([key, value]) => {
+    if (value) next.set(key, value);
+  });
+  const query = next.toString();
+  return query ? `${path}?${query}` : path;
+}
 
 /* ════════════════════════ Page ════════════════════════ */
 export default function QrManager() {
   const navigate = useNavigate();
   const toast    = useToast();
-  const { items, origin } = useLoaderData<typeof loader>();
+  const { items, origin, shopDomain, canAttribution, historyDays } = useLoaderData<typeof loader>();
   const fetcher  = useFetcher<typeof action>();
+  const [searchParams] = useSearchParams();
 
-  const [query,        setQuery]        = useState("");
-  const [typeFilter,   setTypeFilter]   = useState("all");
-  const [statusFilter, setStatusFilter] = useState("all");
-  const [sortBy,       setSortBy]       = useState("recent");
+  const [query,        setQuery]        = useState(searchParams.get("q") ?? "");
+  const [typeFilter,   setTypeFilter]   = useState(coerceUiTypeFilter(searchParams.get("type")));
+  const [statusFilter, setStatusFilter] = useState(coerceStatusFilter(searchParams.get("status")));
+  const [sortBy,       setSortBy]       = useState(coerceSort(searchParams.get("sort")));
   const [downloading,   setDownloading]  = useState<string | null>(null);
+  const [exporting,     setExporting]    = useState(false);
+  const [qrToDelete,    setQrToDelete]   = useState<(typeof items)[number] | null>(null);
 
   const totalScans  = items.reduce((s, q) => s + q.scans, 0);
   const totalConv   = items.reduce((s, q) => s + q.conversions, 0);
@@ -135,16 +182,22 @@ export default function QrManager() {
   const sorted = useMemo(() => {
     const arr = [...filtered];
     if      (sortBy === "scans") arr.sort((a, b) => b.scans - a.scans);
-    else if (sortBy === "conv")  arr.sort((a, b) => b.conversions - a.conversions);
+    else if (sortBy === "conv" && canAttribution) arr.sort((a, b) => b.conversions - a.conversions);
     else if (sortBy === "name")  arr.sort((a, b) => a.name.localeCompare(b.name));
     else                         arr.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
     return arr;
-  }, [filtered, sortBy]);
+  }, [filtered, sortBy, canAttribution]);
 
   const activeFilterCount =
     (typeFilter !== "all" ? 1 : 0) +
     (statusFilter !== "all" ? 1 : 0) +
     (query ? 1 : 0);
+  const exportHref = embeddedResourceHref("/qr/export.csv", searchParams, shopDomain, {
+    q: query.trim(),
+    type: typeFilter !== "all" ? typeFilter : "",
+    status: statusFilter !== "all" ? statusFilter : "",
+    sort: sortBy !== "recent" ? sortBy : "",
+  });
 
   const clearAll = () => { setQuery(""); setTypeFilter("all"); setStatusFilter("all"); };
 
@@ -169,19 +222,47 @@ export default function QrManager() {
     }
   };
 
+  const exportCodes = async () => {
+    setExporting(true);
+    try {
+      await downloadFile(exportHref, "trackqr-codes.csv");
+      toast({ title: "Export downloaded", type: "info" });
+    } catch (err) {
+      toast({ type: "error", title: "Export failed", desc: err instanceof Error ? err.message : "Try again." });
+    } finally {
+      setExporting(false);
+    }
+  };
+
   return (
     <>
+      <ConfirmDialog
+        open={!!qrToDelete}
+        title="Supprimer ce QR code ?"
+        description={qrToDelete ? `Cette action supprimera "${qrToDelete.name}" ainsi que ses scans associés. Cette opération est définitive.` : ""}
+        confirmLabel="Supprimer"
+        cancelLabel="Annuler"
+        tone="danger"
+        loading={fetcher.state !== "idle"}
+        onClose={() => setQrToDelete(null)}
+        onConfirm={() => {
+          if (!qrToDelete) return;
+          submitIntent("delete", qrToDelete.id);
+          setQrToDelete(null);
+        }}
+      />
+
       {/* Header */}
       <div className="page-head">
         <div className="page-head-left">
           <div className="page-eyebrow"><Icon name="qr-code" size={11} /> {items.length} codes</div>
           <h1 className="page-h1">My <span className="em">QR codes</span></h1>
-          <div className="page-sub">Browse, edit and download every code your team has shipped.</div>
+          <div className="page-sub">Browse, edit and download every code your team has shipped. Scan stats show {historyDays ? `the last ${historyDays} days` : "full history"}.</div>
         </div>
         <div className="page-head-actions">
-          <a href="/qr/export.csv" target="_blank" rel="noopener noreferrer" style={{ textDecoration: "none" }}>
-            <Button variant="secondary" icon="download">Export CSV</Button>
-          </a>
+          <Button variant="secondary" icon="download" onClick={exportCodes} disabled={exporting}>
+            {exporting ? "Exporting..." : "Export CSV"}
+          </Button>
           <Button variant="primary" icon="plus" onClick={() => navigate("/app/create")}>New QR code</Button>
         </div>
       </div>
@@ -191,7 +272,7 @@ export default function QrManager() {
         <StatCard accent="blue"   label="Total QR codes" value={items.length}         icon="qr-code"      sub={`${activeCount} active`} />
         <StatCard accent="violet" label="Total scans"    value={fmt(totalScans)}      icon="scan" />
         <StatCard accent="green"  label="Active rate"    value={fmtPct(activePct, 0)} icon="circle-check" sub={`${activeCount} / ${items.length}`} />
-        <StatCard accent="amber"  label="Conversions"    value={fmt(totalConv)}       icon="zap" />
+        <StatCard accent="amber"  label={canAttribution ? "Conversions" : "Conversions locked"} value={canAttribution ? fmt(totalConv) : "Growth"} icon="zap" />
       </div>
 
       {/* ── Filterbar ── */}
@@ -216,16 +297,16 @@ export default function QrManager() {
         <div className="filterbar-divider" />
         <div className="filterbar-group">
           <span className="filter-select-label">Status</span>
-          <Segmented value={statusFilter} onChange={setStatusFilter}
+          <Segmented value={statusFilter} onChange={v => setStatusFilter(coerceStatusFilter(v))}
             options={[{ value: "all", label: "All" }, { value: "active", label: "Active" }, { value: "inactive", label: "Paused" }]} />
         </div>
         <div className="filterbar-divider" />
         <div className="filterbar-group">
           <span className="filter-select-label">Sort</span>
-          <select className="filter-select" value={sortBy} onChange={e => setSortBy(e.target.value)}>
+          <select className="filter-select" value={sortBy} onChange={e => setSortBy(coerceSort(e.target.value))}>
             <option value="recent">Most recent</option>
             <option value="scans">Most scans</option>
-            <option value="conv">Most conversions</option>
+            {canAttribution && <option value="conv">Most conversions</option>}
             <option value="name">Name (A→Z)</option>
           </select>
         </div>
@@ -327,10 +408,12 @@ export default function QrManager() {
                     <div className="text-xs muted" style={{ fontFamily: "var(--ff-mono)", textTransform: "uppercase", letterSpacing: ".06em", fontSize: 10 }}>Scans</div>
                     <div className="strong num" style={{ fontSize: 16, fontFamily: "var(--ff-display)" }}>{fmt(qr.scans)}</div>
                   </div>
-                  <div style={{ flex: 1 }}>
-                    <div className="text-xs muted" style={{ fontFamily: "var(--ff-mono)", textTransform: "uppercase", letterSpacing: ".06em", fontSize: 10 }}>Conv.</div>
-                    <div className="strong num" style={{ fontSize: 16, fontFamily: "var(--ff-display)" }}>{fmt(qr.conversions)}</div>
-                  </div>
+                  {canAttribution && (
+                    <div style={{ flex: 1 }}>
+                      <div className="text-xs muted" style={{ fontFamily: "var(--ff-mono)", textTransform: "uppercase", letterSpacing: ".06em", fontSize: 10 }}>Conv.</div>
+                      <div className="strong num" style={{ fontSize: 16, fontFamily: "var(--ff-display)" }}>{fmt(qr.conversions)}</div>
+                    </div>
+                  )}
                   <div className="flex gap-2">
                     <Button size="sm" variant="ghost"
                       title="Edit QR code"
@@ -412,10 +495,7 @@ export default function QrManager() {
                     </details>
                     <Button size="sm" variant="ghost"
                       title="Delete QR code"
-                      onClick={() => {
-                        if (!confirm(`Delete "${qr.name}"? This also removes its scans.`)) return;
-                        submitIntent("delete", qr.id);
-                      }}>
+                      onClick={() => setQrToDelete(qr)}>
                       <Icon name="trash" size={13} />
                     </Button>
                   </div>

@@ -44,10 +44,10 @@ api_version = "2026-07"
 
 [access_scopes]
 # Learn more at https://shopify.dev/docs/apps/tools/cli/configuration#access_scopes
-# read_products  — needed for the QR Create page product picker
-# read_discounts — needed for the QR promo type
+# write_products  — includes product reads needed for the QR Create page product picker
+# write_discounts — includes discount reads needed for the QR promo type
 # read_orders    — needed for order webhook attribution
-scopes = "write_products,read_products,write_discounts,read_discounts,read_orders,write_metaobjects,write_metaobject_definitions"
+scopes = "write_products,write_discounts,read_orders,write_metaobjects,write_metaobject_definitions"
 
 [auth]
 redirect_urls = [ "https://track-qr-green.vercel.app/auth/callback" ]

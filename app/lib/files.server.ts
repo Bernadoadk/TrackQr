@@ -1,5 +1,7 @@
 import prisma from "../db.server";
 import crypto from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
 
 interface AdminGraphqlClient {
   graphql: (query: string, options?: { variables?: Record<string, unknown> }) => Promise<{ json: <T>() => Promise<T> }>;
@@ -38,7 +40,52 @@ interface CloudinaryUploadResponse {
   height?: number;
 }
 
+let attemptedDotenvLoad = false;
+
+function parseDotenvLine(line: string) {
+  const trimmed = line.trim();
+  if (!trimmed || trimmed.startsWith("#") || !trimmed.includes("=")) return null;
+  const equalsAt = trimmed.indexOf("=");
+  const key = trimmed.slice(0, equalsAt).trim();
+  let value = trimmed.slice(equalsAt + 1).trim();
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) return null;
+  if (
+    (value.startsWith('"') && value.endsWith('"')) ||
+    (value.startsWith("'") && value.endsWith("'"))
+  ) {
+    value = value.slice(1, -1);
+  }
+  return { key, value };
+}
+
+function loadCloudinaryEnvFromDotenv() {
+  if (attemptedDotenvLoad || process.env.CLOUDINARY_CLOUD_NAME) return;
+  attemptedDotenvLoad = true;
+
+  let envPath = "";
+  for (let dir = process.cwd(); dir;) {
+    const candidate = path.join(dir, ".env");
+    if (fs.existsSync(candidate)) {
+      envPath = candidate;
+      break;
+    }
+    const parent = path.dirname(dir);
+    if (parent === dir) return;
+    dir = parent;
+  }
+
+  const content = fs.readFileSync(envPath, "utf8");
+  for (const line of content.split(/\r?\n/)) {
+    const parsed = parseDotenvLine(line);
+    if (!parsed || !parsed.key.startsWith("CLOUDINARY_")) continue;
+    if (process.env[parsed.key] === undefined) {
+      process.env[parsed.key] = parsed.value;
+    }
+  }
+}
+
 function cloudinaryConfig() {
+  loadCloudinaryEnvFromDotenv();
   const cloudName = process.env.CLOUDINARY_CLOUD_NAME?.trim();
   const apiKey = process.env.CLOUDINARY_API_KEY?.trim();
   const apiSecret = process.env.CLOUDINARY_API_SECRET?.trim();
@@ -62,7 +109,7 @@ export async function uploadImageToCloudinary(opts: {
   file: { name: string; mimeType: string; size: number; bytes: Buffer | ArrayBuffer };
 }): Promise<UploadedLogo> {
   const config = cloudinaryConfig();
-  if (!config) throw new Error("Cloudinary is not configured");
+  if (!config) throw new Error("Cloudinary is not configured: CLOUDINARY_CLOUD_NAME is missing");
   if (!config.uploadPreset && (!config.apiKey || !config.apiSecret)) {
     throw new Error("Cloudinary needs either CLOUDINARY_UPLOAD_PRESET or CLOUDINARY_API_KEY/CLOUDINARY_API_SECRET");
   }

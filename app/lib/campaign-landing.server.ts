@@ -1,5 +1,6 @@
-import type { Campaign, Shop } from "@prisma/client";
+import type { Campaign, Shop, Subscription } from "@prisma/client";
 import prisma from "../db.server";
+import { campaignPageSettingsForPlan } from "./campaign-settings";
 
 type CampaignBlock = {
   id: string;
@@ -13,7 +14,7 @@ function jsonRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
 }
 
-export async function campaignLandingData(campaign: Campaign & { shop: Shop }, isPreview = false) {
+export async function campaignLandingData(campaign: Campaign & { shop: Shop & { activeSubscription?: Subscription | null } }, isPreview = false) {
   const blocks = campaign.blocks as CampaignBlock[];
   const qrIds = Array.from(new Set(blocks.map(b => String(b.props?.qrId || "")).filter(Boolean)));
   const qrRows = qrIds.length
@@ -30,6 +31,7 @@ export async function campaignLandingData(campaign: Campaign & { shop: Shop }, i
     isPreview,
     status: campaign.status,
     shopDomain: campaign.shop.domain,
+    settings: campaignPageSettingsForPlan(campaign.settings, !campaign.shop.activeSubscription),
     blocks,
     qrById: Object.fromEntries(qrRows.map(q => [q.id, {
       id: q.id,

@@ -95,6 +95,7 @@ export interface LogoSelection {
   kind: "none" | "brand" | "custom";
   brandId?: string | null;
   customUrl?: string | null;
+  customPreviewUrl?: string | null;
   customAssetId?: string | null;
 }
 
@@ -105,6 +106,13 @@ export function LogoPicker({ value, onChange }: {
   const [uploading, setUploading] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
   const fileRef = React.useRef<HTMLInputElement>(null);
+  const previewUrlRef = React.useRef<string | null>(null);
+
+  React.useEffect(() => {
+    return () => {
+      if (previewUrlRef.current) URL.revokeObjectURL(previewUrlRef.current);
+    };
+  }, []);
 
   const triggerUpload = () => {
     setError(null);
@@ -125,9 +133,13 @@ export function LogoPicker({ value, onChange }: {
         setError(json.message ?? "Upload failed");
         return;
       }
+      if (previewUrlRef.current) URL.revokeObjectURL(previewUrlRef.current);
+      const previewUrl = URL.createObjectURL(file);
+      previewUrlRef.current = previewUrl;
       onChange({
         kind: "custom",
         customUrl: json.asset.url,
+        customPreviewUrl: previewUrl,
         customAssetId: json.asset.assetId,
       });
     } catch (err) {
@@ -186,7 +198,7 @@ export function LogoPicker({ value, onChange }: {
             title="Replace custom logo"
             style={tileStyle(true)}
           >
-            <img src={value.customUrl} alt="Custom" width={28} height={28} style={{ display: "block", objectFit: "contain" }} />
+            <img src={value.customPreviewUrl || value.customUrl} alt="Custom" width={28} height={28} style={{ display: "block", objectFit: "contain" }} />
           </button>
         ) : (
           <button

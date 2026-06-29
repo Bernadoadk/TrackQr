@@ -46,6 +46,17 @@ export function Sidebar({ theme, onTheme }: SidebarProps) {
     return location.pathname.startsWith(path);
   };
 
+  const withEmbeddedParams = (path: string) => {
+    const current = new URLSearchParams(location.search);
+    const next = new URLSearchParams();
+    const shop = current.get("shop");
+    const host = current.get("host");
+    if (shop) next.set("shop", shop);
+    if (host) next.set("host", host);
+    const query = next.toString();
+    return query ? `${path}?${query}` : path;
+  };
+
   const usagePct = qrLimit == null ? 0 : Math.min(100, Math.round(qrUsed / qrLimit * 100));
 
   return (
@@ -53,7 +64,7 @@ export function Sidebar({ theme, onTheme }: SidebarProps) {
       {/* Brand */}
       <div className="sb-brand">
         <div className="sb-mark">
-          <Icon name="qr-code" size={18} />
+          <img src="/TrackQr.png" alt="" />
         </div>
         <div className="sb-brand-text">
           <div className="sb-brand-name">TrackQr</div>
@@ -67,7 +78,7 @@ export function Sidebar({ theme, onTheme }: SidebarProps) {
         {NAV_ITEMS.map(item => (
           <NavLink
             key={item.id}
-            to={item.path}
+            to={withEmbeddedParams(item.path)}
             className={`sb-item ${isActive(item.path) ? "active" : ""}`}
           >
             <div className="sb-item-icon"><Icon name={item.icon} /></div>
@@ -90,7 +101,7 @@ export function Sidebar({ theme, onTheme }: SidebarProps) {
           ) : (
             <NavLink
               key={item.id}
-              to={item.path}
+              to={withEmbeddedParams(item.path)}
               className={`sb-item ${isActive(item.path) ? "active" : ""}`}
             >
               <div className="sb-item-icon"><Icon name={item.icon} /></div>
@@ -106,7 +117,7 @@ export function Sidebar({ theme, onTheme }: SidebarProps) {
       <div
         className="sb-plan"
         data-plan={planId}
-        onClick={() => navigate("/app/pricing")}
+        onClick={() => navigate(withEmbeddedParams("/app/pricing"))}
         style={{ cursor: "default" }}
       >
         <div className="sb-plan-head">
@@ -130,7 +141,7 @@ export function Sidebar({ theme, onTheme }: SidebarProps) {
         {upgradeTarget && (
           <button
             className="sb-plan-cta"
-            onClick={(e) => { e.stopPropagation(); navigate("/app/pricing"); }}
+            onClick={(e) => { e.stopPropagation(); navigate(withEmbeddedParams("/app/pricing")); }}
           >
             <Icon name="arrow-up" />
             Upgrade to {upgradeTarget}

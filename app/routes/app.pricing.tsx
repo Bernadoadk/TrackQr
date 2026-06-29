@@ -1,28 +1,41 @@
 import type { LoaderFunctionArgs, ActionFunctionArgs } from "react-router";
 import { useEffect, useState } from "react";
 import { useLoaderData, useFetcher, useSearchParams } from "react-router";
-import { requireShop } from "../lib/shop.server";
-import { resolvePlan } from "../lib/plan.server";
-import { startSubscription, cancelSubscription, markSubscriptionActive } from "../lib/billing.server";
-import prisma from "../db.server";
+import { INSTALL_TRIAL_DAYS } from "../lib/plan.constants";
 import { Icon } from "../components/ui/Icon";
 import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
 import { Card } from "../components/ui/Card";
 import { Segmented } from "../components/ui/Segmented";
 import { useToast } from "../components/ui/Toast";
+import { ConfirmDialog } from "../components/ui/ConfirmDialog";
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
-  const { shop } = await requireShop(request);
-  const url = new URL(request.url);
+  const [
+    { requireShop },
+    { getBillingAccess },
+    { syncShopifySubscriptions },
+    { default: prisma },
+  ] = await Promise.all([
+    import("../lib/shop.server"),
+    import("../lib/plan.server"),
+    import("../lib/billing.server"),
+    import("../db.server"),
+  ]);
+  const { admin, shop } = await requireShop(request);
 
-  // Shopify returns the merchant with ?confirmed=1 after they approve the subscription.
-  if (url.searchParams.get("confirmed") === "1") {
-    await markSubscriptionActive({ shopId: shop.id });
-  }
+  await syncShopifySubscriptions({
+    admin: admin as never as { graphql: AdminGraphqlClientArg },
+    shopId: shop.id,
+  });
+  const syncedShop = await prisma.shop.findUnique({
+    where: { id: shop.id },
+    include: { activeSubscription: { include: { plan: true } } },
+  });
 
+  const effectiveShop = syncedShop ?? shop;
+  const access = await getBillingAccess(effectiveShop);
   const plans = await prisma.plan.findMany({ orderBy: { priceMonthly: "asc" } });
-  const active = await resolvePlan(shop);
   return {
     plans: plans.map(p => ({
       id: p.id,
@@ -39,12 +52,27 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       multiStore: p.multiStore,
       api: p.api,
       customDomain: p.customDomain,
+      prioritySupport: p.prioritySupport,
     })),
-    currentPlanId: active.id,
+    currentPlanId: access.plan.id,
+    currentCycle: access.cycle,
+    accessStatus: access.status,
+    trialDaysLeft: access.daysLeft,
+    trialEndsAt: access.trialEndsAt,
+    hasActiveSubscription: access.status === "active",
   };
 };
 
 export const action = async ({ request }: ActionFunctionArgs) => {
+  const [
+    { requireShop },
+    { startSubscription, cancelSubscription },
+    { default: prisma },
+  ] = await Promise.all([
+    import("../lib/shop.server"),
+    import("../lib/billing.server"),
+    import("../db.server"),
+  ]);
   const { admin, shop } = await requireShop(request);
   const form = await request.formData();
   const intent = String(form.get("intent") ?? "");
@@ -54,18 +82,17 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     const cycle  = (String(form.get("cycle") ?? "MONTHLY").toUpperCase() === "ANNUAL" ? "ANNUAL" : "MONTHLY") as "MONTHLY" | "ANNUAL";
     const plan = await prisma.plan.findUnique({ where: { id: planId } });
     if (!plan) return { ok: false, error: "unknown-plan" } as const;
-    if (planId === "starter") {
-      // No paid plan needed for Starter — just deactivate any existing subscription.
-      await prisma.shop.update({ where: { id: shop.id }, data: { activeSubscriptionId: null } });
-      return { ok: true, intent, plan: planId } as const;
-    }
-    const appUrl = process.env.SHOPIFY_APP_URL ?? new URL(request.url).origin;
+    const url = new URL(request.url);
+    const host = (form.get("host") as string | null) || url.searchParams.get("host");
+    const appUrl = process.env.SHOPIFY_APP_URL ?? url.origin;
     const { confirmationUrl } = await startSubscription({
       admin: admin as never as { graphql: AdminGraphqlClientArg },
       shop,
       plan,
       cycle,
       appUrl,
+      host,
+      trialDays: 0,
     });
     return { ok: true, intent, confirmationUrl } as const;
   }
@@ -87,42 +114,75 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 type AdminGraphqlClientArg = (q: string, options?: { variables?: Record<string, unknown> }) => Promise<{ json: <T>() => Promise<T> }>;
 
 const PLAN_META: Record<string, { icon: string; accent: string; tagline: string; featured?: boolean; badge?: string }> = {
-  starter: { icon: "rocket",    accent: "blue",   tagline: "Lancez vos premiers QR codes en quelques minutes." },
-  growth:  { icon: "zap",       accent: "violet", tagline: "Attribuez chaque scan à une commande Shopify.", featured: true, badge: "Le plus populaire" },
-  pro:     { icon: "sparkles",  accent: "amber",  tagline: "Multi-boutiques, agences & équipes avancées." },
+  starter: { icon: "rocket",    accent: "blue",   tagline: "Launch your first QR codes and campaign pages." },
+  growth:  { icon: "zap",       accent: "violet", tagline: "Measure sales generated by every scan.", featured: true, badge: "Most popular" },
+  pro:     { icon: "sparkles",  accent: "amber",  tagline: "For high-volume campaigns and advanced teams." },
 };
 
 const PLAN_ORDER = ["starter", "growth", "pro"];
 
 const FAQS = [
-  { q: "Puis-je changer de plan plus tard ?", a: "Oui — upgrade ou downgrade à tout moment. Les frais sont calculés au prorata lors d'un upgrade, et un crédit est appliqué sur la prochaine facture lors d'un downgrade." },
-  { q: "Que se passe-t-il avec mes QR codes si je rétrograde ?", a: "Tous vos codes continuent de fonctionner. Si vous dépassez la limite du nouveau plan, les plus anciens seront mis en pause (non supprimés) jusqu'à ce que vous upgradiez ou en supprimiez." },
-  { q: "Y a-t-il une période d'essai ?", a: "Chaque plan démarre avec 14 jours d'essai gratuit. Facturation Shopify uniquement — pas de carte requise." },
-  { q: "Les taxes sont-elles incluses ?", a: "Les prix affichés sont hors TVA. La taxe applicable est ajoutée lors du paiement selon votre pays de facturation." },
-  { q: "Puis-je payer par facture ?", a: "Les plans Pro annuels peuvent être facturés. Contactez-nous à sales@trackqr.com." },
+  { q: "Can I change plans later?", a: "Yes. You can upgrade or downgrade at any time. Shopify handles billing adjustments when the subscription changes." },
+  { q: "What happens if I downgrade?", a: "Your existing QR codes and campaigns remain available. If you exceed the new plan limit, creating or duplicating new items is blocked until you archive items or upgrade again." },
+  { q: "How does the free trial work?", a: `The ${INSTALL_TRIAL_DAYS}-day free trial starts when the app is installed and gives access to Pro features. It is not restarted by subscribing, cancelling, or reinstalling.` },
+  { q: "Are taxes included?", a: "Displayed prices exclude taxes. Shopify adds applicable taxes during checkout based on the store's billing location." },
+  { q: "What happens when the trial ends?", a: "If there is no active subscription after the installation trial, the app redirects to Pricing and active QR codes/campaigns are paused until a plan is selected." },
 ];
 
 function featuresFor(plan: ReturnType<typeof useLoaderData<typeof loader>>["plans"][number]) {
-  const items: { label: string; included: boolean; hl?: boolean }[] = [];
-  items.push({ label: plan.qrCodeLimit == null   ? "QR codes illimités"     : `${plan.qrCodeLimit} QR codes dynamiques`, included: true, hl: plan.qrCodeLimit == null });
-  items.push({ label: plan.campaignLimit == null ? "Campagnes illimitées"   : `${plan.campaignLimit} pages de campagne`, included: true });
-  items.push({ label: plan.historyDays == null   ? "Historique illimité"    : `Historique scans — ${plan.historyDays >= 365 ? "1 an" : `${plan.historyDays} jours`}`, included: true });
-  items.push({ label: "Couleurs & styles personnalisés", included: true });
-  items.push({ label: "Attribution commandes Shopify",   included: plan.attribution,  hl: plan.attribution });
-  items.push({ label: "Notifications leads par SMTP",   included: true });
-  items.push({ label: "Multi-boutiques Shopify",         included: plan.multiStore });
-  items.push({ label: "Accès API + webhooks",            included: plan.api });
-  items.push({ label: "Domaine de redirection personnalisé", included: plan.customDomain });
+  const history = plan.historyDays == null
+    ? "Unlimited scan history"
+    : `Scan history - ${plan.historyDays >= 365 ? "1 year" : `${plan.historyDays} days`}`;
+  const items: { label: string; included: boolean; hl?: boolean }[] = [
+    {
+      label: plan.qrCodeLimit == null ? "Unlimited dynamic QR codes" : `${plan.qrCodeLimit} dynamic QR codes`,
+      included: true,
+      hl: plan.qrCodeLimit == null,
+    },
+    {
+      label: plan.campaignLimit == null ? "Unlimited campaign pages" : `${plan.campaignLimit} campaign pages`,
+      included: true,
+      hl: plan.campaignLimit == null,
+    },
+    { label: history, included: true, hl: plan.historyDays == null },
+    { label: "QR destinations: product, cart, promo code, URL, phone, email, SMS, Wi-Fi and vCard", included: true },
+    { label: "QR customization: colors, shapes, logo and label", included: true },
+    { label: "PNG, SVG and PDF downloads", included: true },
+    { label: "UTM parameters for Google Analytics and Shopify Analytics", included: true },
+    { label: "Campaign page editor with product, promo, FAQ, review, video and embedded QR blocks", included: true },
+    { label: "Email capture and new lead notifications", included: true },
+    { label: "Saved QR design templates", included: true },
+    { label: "Scan CSV export", included: true },
+  ];
+
+  if (plan.id === "starter") return items;
+
+  items.push(
+    { label: "Shopify order attribution", included: plan.attribution, hl: plan.attribution },
+    { label: "Conversion reporting by QR code", included: plan.attribution },
+  );
+
+  if (plan.id === "pro") {
+    items.push(
+      { label: "Unlimited QR codes and campaigns", included: true, hl: true },
+      { label: "Priority support", included: plan.prioritySupport },
+      { label: "Built for advanced marketing teams", included: true },
+    );
+  } else if (plan.prioritySupport) {
+    items.push({ label: "Priority support", included: true });
+  }
+
   return items;
 }
 
 export default function PricingPage() {
   const toast = useToast();
-  const { plans, currentPlanId } = useLoaderData<typeof loader>();
+  const { plans, currentPlanId, currentCycle, accessStatus, trialDaysLeft, hasActiveSubscription } = useLoaderData<typeof loader>();
   const fetcher = useFetcher<typeof action>();
   const [searchParams, setSearchParams] = useSearchParams();
-  const [cycle, setCycle] = useState<"monthly" | "annual">("annual");
+  const [cycle, setCycle] = useState<"monthly" | "annual">("monthly");
   const [openFaq, setOpenFaq] = useState<string | null>(FAQS[0].q);
+  const [confirmCancelOpen, setConfirmCancelOpen] = useState(false);
 
   // After successful subscription start, redirect to Shopify confirmation page.
   useEffect(() => {
@@ -133,8 +193,22 @@ export default function PricingPage() {
   }, [fetcher.state, fetcher.data]);
 
   useEffect(() => {
+    if (fetcher.state === "idle" && fetcher.data?.ok && fetcher.data.intent === "cancel") {
+      setConfirmCancelOpen(false);
+      toast({ title: "Subscription cancelled", desc: "Active QR codes and campaigns were paused.", type: "info" });
+    }
+  }, [fetcher.state, fetcher.data]);
+
+  useEffect(() => {
+    if (searchParams.get("billing") === "required") {
+      toast({ title: "Subscription required", desc: "The installation trial has ended. Choose a plan to continue.", type: "warning" });
+      const next = new URLSearchParams(searchParams);
+      next.delete("billing");
+      setSearchParams(next, { replace: true });
+      return;
+    }
     if (searchParams.get("confirmed") === "1") {
-      toast({ title: "Subscription active", desc: "Welcome to your new plan." });
+      toast({ title: "Payment approved", desc: "Shopify is now syncing your TrackQr subscription." });
       const next = new URLSearchParams(searchParams);
       next.delete("confirmed");
       setSearchParams(next, { replace: true });
@@ -146,11 +220,37 @@ export default function PricingPage() {
     fd.set("intent", "subscribe");
     fd.set("planId", planId);
     fd.set("cycle", cycle === "annual" ? "ANNUAL" : "MONTHLY");
+    const shop = searchParams.get("shop");
+    const host = searchParams.get("host");
+    if (shop) fd.set("shop", shop);
+    if (host) fd.set("host", host);
+    fetcher.submit(fd, { method: "post" });
+  };
+
+  const cancelActiveSubscription = () => {
+    const fd = new FormData();
+    fd.set("intent", "cancel");
+    const shop = searchParams.get("shop");
+    const host = searchParams.get("host");
+    if (shop) fd.set("shop", shop);
+    if (host) fd.set("host", host);
     fetcher.submit(fd, { method: "post" });
   };
 
   return (
     <>
+      <ConfirmDialog
+        open={confirmCancelOpen}
+        title="Cancel subscription?"
+        description="The active Shopify subscription will be cancelled. Your data stays in TrackQr, but active QR codes and campaigns may be paused if no trial access is available."
+        confirmLabel="Cancel subscription"
+        cancelLabel="Keep plan"
+        tone="danger"
+        loading={fetcher.state !== "idle"}
+        onClose={() => setConfirmCancelOpen(false)}
+        onConfirm={cancelActiveSubscription}
+      />
+
       <div className="page-head">
         <div className="page-head-left" style={{ textAlign: "center", marginInline: "auto", flex: "0 1 720px" }}>
           <div className="page-eyebrow" style={{ marginInline: "auto" }}>
@@ -160,7 +260,7 @@ export default function PricingPage() {
             Plans that <span className="em">scale</span> with your scans.
           </h1>
           <div className="page-sub" style={{ marginInline: "auto" }}>
-            Pay as your QR program grows. Cancel any time. Every plan starts with a 14-day free trial.
+            Create dynamic QR codes, publish campaign pages, and measure sales generated by every scan. Pro features are included during the {INSTALL_TRIAL_DAYS}-day installation trial.
           </div>
 
           <div className="pricing-cycle">
@@ -184,7 +284,9 @@ export default function PricingPage() {
         {plans.map(plan => {
           const meta = PLAN_META[plan.id] ?? { icon: "rocket", accent: "blue", tagline: "" };
           const price = cycle === "annual" ? plan.priceAnnual : plan.priceMonthly;
-          const isCurrent = plan.id === currentPlanId;
+          const selectedCycle = cycle === "annual" ? "ANNUAL" : "MONTHLY";
+          const isCurrent = hasActiveSubscription && plan.id === currentPlanId && currentCycle === selectedCycle;
+          const isTrialPlan = accessStatus === "trial" && plan.id === currentPlanId;
           const currentIdx = PLAN_ORDER.indexOf(currentPlanId);
           const planIdx    = PLAN_ORDER.indexOf(plan.id);
           const direction  = planIdx > currentIdx ? "up" : planIdx < currentIdx ? "down" : "same";
@@ -195,11 +297,14 @@ export default function PricingPage() {
               className={`pricing-card ${meta.featured ? "featured" : ""} ${isCurrent ? "is-current" : ""}`}
               data-accent={meta.accent}
             >
-              {meta.badge && !isCurrent && (
+              {meta.badge && !isCurrent && !isTrialPlan && (
                 <div className="pricing-badge"><Icon name="sparkles" size={10} />{meta.badge}</div>
               )}
               {isCurrent && (
-                <div className="pricing-badge current"><Icon name="circle-check" size={10} />Your plan</div>
+                <div className="pricing-badge current"><Icon name="circle-check" size={10} />Your {cycle === "annual" ? "annual" : "monthly"} plan</div>
+              )}
+              {!isCurrent && isTrialPlan && (
+                <div className="pricing-badge current"><Icon name="shield" size={10} />Trial Pro · {trialDaysLeft}j</div>
               )}
 
               <div className="pricing-head">
@@ -225,7 +330,7 @@ export default function PricingPage() {
                       <span className="pricing-strike num">${plan.priceMonthly * 12}</span>
                     </>
                   ) : (
-                    <>Billed monthly · ${plan.annualTotal.toLocaleString()}/yr if you switch</>
+                    <>Billed monthly · ${plan.annualTotal.toLocaleString()}/yr on annual</>
                   )}
                 </div>
               </div>
@@ -237,7 +342,7 @@ export default function PricingPage() {
                 disabled={fetcher.state !== "idle"}
                 onClick={() => {
                   if (isCurrent) {
-                    toast({ title: "You're on this plan", desc: "Manage billing from Shopify admin → Settings → Apps.", type: "info" });
+                    toast({ title: "You're on this plan", desc: "Billing is managed in Shopify admin → Settings → Apps.", type: "info" });
                     return;
                   }
                   startCheckout(plan.id);
@@ -245,18 +350,31 @@ export default function PricingPage() {
                 iconRight={isCurrent ? undefined : "arrow-right"}
               >
                 {fetcher.state !== "idle"
-                  ? "Opening Shopify…"
+                  ? "Opening Shopify..."
                   : isCurrent
-                    ? "Your plan"
+                    ? `Your ${cycle === "annual" ? "annual" : "monthly"} plan`
                     : direction === "up"
-                      ? `Upgrade to ${plan.name}`
+                      ? `Upgrade to ${plan.name} ${cycle === "annual" ? "annual" : "monthly"}`
                       : direction === "down"
-                        ? `Switch to ${plan.name}`
-                        : `Choose ${plan.name}`}
+                        ? `Switch to ${plan.name} ${cycle === "annual" ? "annual" : "monthly"}`
+                        : `Choose ${plan.name} ${cycle === "annual" ? "annual" : "monthly"}`}
               </Button>
+              {isCurrent && hasActiveSubscription && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="pricing-cta"
+                  disabled={fetcher.state !== "idle"}
+                  onClick={() => setConfirmCancelOpen(true)}
+                  icon="trash"
+                  style={{ marginTop: 8, color: "var(--red-fg)" }}
+                >
+                  Cancel subscription
+                </Button>
+              )}
 
               <div className="pricing-features">
-                <div className="pricing-features-label">What's included</div>
+                <div className="pricing-features-label">Included</div>
                 <ul>
                   {featuresFor(plan).map((f, i) => (
                     <li key={i} className={f.included ? "" : "off"} data-hl={f.hl ? "true" : "false"}>
@@ -272,14 +390,13 @@ export default function PricingPage() {
       </div>
 
       <div className="pricing-trust">
-        <div><Icon name="shield" size={14} /><span>14-day free trial</span></div>
-        <div><Icon name="credit-card" size={14} /><span>Billed via Shopify</span></div>
+        <div><Icon name="shield" size={14} /><span>{INSTALL_TRIAL_DAYS}-day Pro installation trial</span></div>
+        <div><Icon name="credit-card" size={14} /><span>Billed through Shopify</span></div>
         <div><Icon name="zap" size={14} /><span>Cancel any time</span></div>
-        <div><Icon name="globe" size={14} /><span>Used by 1,200+ Shopify stores</span></div>
       </div>
 
       <div className="section">
-        <h2 className="section-h">Pricing FAQ</h2>
+        <h2 className="section-h">Frequently Asked Questions</h2>
         <Card>
           {FAQS.map((f, i) => (
             <div
@@ -303,52 +420,6 @@ export default function PricingPage() {
         </Card>
       </div>
 
-      <Card
-        className="card-pad-lg mt-6"
-        style={{
-          background: "linear-gradient(135deg, #14225C 0%, #2A2078 50%, #4A1F8B 100%)",
-          color: "#fff",
-          border: 0,
-          position: "relative",
-          overflow: "hidden",
-        }}
-      >
-        <div style={{
-          position: "absolute", inset: 0, pointerEvents: "none",
-          background:
-            "radial-gradient(60% 50% at 20% 10%, rgba(255,255,255,0.18) 0%, transparent 60%), " +
-            "radial-gradient(45% 60% at 90% 100%, rgba(165, 128, 255, 0.4) 0%, transparent 60%)",
-        }} />
-        <div className="flex items-center" style={{ justifyContent: "space-between", gap: 24, position: "relative" }}>
-          <div>
-            <Badge tone="violet" style={{ background: "rgba(255,255,255,0.12)", color: "#fff", border: "1px solid rgba(255,255,255,0.18)" }}>
-              <Icon name="message-square" size={10} /> Enterprise
-            </Badge>
-            <h3 style={{ fontFamily: "var(--ff-display)", fontWeight: 600, fontSize: 22, letterSpacing: "-0.02em", margin: "10px 0 6px" }}>
-              Running 10+ stores or printing a million QR codes?
-            </h3>
-            <p style={{ color: "rgba(255,255,255,0.7)", fontSize: 14, margin: 0 }}>
-              Custom volume pricing, dedicated CSM, security review and procurement help.
-            </p>
-          </div>
-          <div className="flex gap-2">
-            <Button
-              variant="secondary"
-              iconRight="external-link"
-              style={{ background: "rgba(255,255,255,0.10)", color: "#fff", borderColor: "rgba(255,255,255,0.18)" }}
-            >
-              Read the docs
-            </Button>
-            <Button
-              variant="primary"
-              icon="message-square"
-              style={{ background: "#fff", color: "#14225C", borderColor: "#fff", boxShadow: "0 6px 18px -6px rgba(0,0,0,0.4)" }}
-            >
-              Talk to sales
-            </Button>
-          </div>
-        </div>
-      </Card>
     </>
   );
 }

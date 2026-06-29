@@ -2,6 +2,7 @@ import type { HeadersFunction, LoaderFunctionArgs, ActionFunctionArgs } from "re
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useLoaderData, useFetcher } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
+import { siFacebook, siInstagram, siTiktok, siX } from "simple-icons";
 import { requireShop } from "../lib/shop.server";
 import { getCampaign, listCampaignBlockQrChoices, saveBlocks, setCampaignStatus } from "../lib/campaign.server";
 import type { CampaignStatus } from "@prisma/client";
@@ -13,6 +14,7 @@ import { Segmented } from "../components/ui/Segmented";
 import { useToast } from "../components/ui/Toast";
 import { renderQrSvg } from "../lib/qr-render";
 import { LABEL_FONTS, LABEL_FONT_GROUPS, DEFAULT_FONT, getLabelFont } from "../lib/label-fonts";
+import { DEFAULT_CAMPAIGN_PAGE_SETTINGS, campaignPageSettingsForPlan, normalizeCampaignPageSettings, type CampaignPageSettings } from "../lib/campaign-settings";
 
 export const loader = async ({ request, params }: LoaderFunctionArgs) => {
   const { shop } = await requireShop(request);
@@ -27,8 +29,10 @@ export const loader = async ({ request, params }: LoaderFunctionArgs) => {
       slug: campaign.slug,
       name: campaign.name,
       status: campaign.status,
+      settings: normalizeCampaignPageSettings(campaign.settings),
       blocks: (campaign.blocks as unknown) as Array<{ id: string; type: string; props: Record<string, unknown>; layout: { padding: string; align: string; bg: string }; visibility: { mobile: boolean; desktop: boolean } }>,
     },
+    isTrial: !shop.activeSubscription,
     shopDomain: shop.domain,
     qrChoices: qrChoices.map(q => ({
       id: q.id,
@@ -54,8 +58,9 @@ export const action = async ({ request, params }: ActionFunctionArgs) => {
   try {
     if (intent === "save") {
       const blocks = JSON.parse(String(form.get("blocks") ?? "[]"));
+      const settings = normalizeCampaignPageSettings(JSON.parse(String(form.get("settings") ?? "{}")));
       const name = (form.get("name") as string | null) ?? undefined;
-      await saveBlocks(shop.id, params.id, blocks, name);
+      await saveBlocks(shop.id, params.id, blocks, name, settings);
       return { ok: true, savedAt: new Date().toISOString() } as const;
     }
     if (intent === "publish") {
@@ -63,7 +68,8 @@ export const action = async ({ request, params }: ActionFunctionArgs) => {
       const name = (form.get("name") as string | null) ?? undefined;
       if (blocksRaw) {
         const blocks = JSON.parse(String(blocksRaw));
-        await saveBlocks(shop.id, params.id, blocks, name);
+        const settings = normalizeCampaignPageSettings(JSON.parse(String(form.get("settings") ?? "{}")));
+        await saveBlocks(shop.id, params.id, blocks, name, settings);
       }
       await setCampaignStatus(shop.id, params.id, "ACTIVE");
       return { ok: true, status: "ACTIVE" as CampaignStatus } as const;
@@ -131,6 +137,9 @@ type BlockEditorActions = {
   pickProducts: (apply: (items: ShopifyPickedResource[]) => void) => Promise<void>;
   pickCollection: (apply: (item: ShopifyPickedResource) => void) => Promise<void>;
 };
+type BlockPropSetter = (k: string, v: unknown) => void;
+type BlockPropsSetter = (values: Record<string, unknown>) => void;
+const PAGE_SETTINGS_ID = "__page_settings";
 function isPickedResource(value: unknown): value is ShopifyPickedResource {
   return !!value && typeof value === "object" && typeof (value as ShopifyPickedResource).id === "string" && typeof (value as ShopifyPickedResource).title === "string";
 }
@@ -264,9 +273,9 @@ function bgValue(value: unknown) {
     case "sunken": return "var(--bg-sunken)";
     case "brand-soft": return "var(--accent-soft)";
     case "brand": return "var(--accent)";
-    case "dark": return "var(--fg-strong)";
+    case "dark": return "#0B1220";
     case "surface":
-    default: return "var(--bg-surface)";
+    default: return "transparent";
   }
 }
 function blockStyle(p: Record<string, unknown>, layout?: { padding?: string; align?: string; bg?: string }): React.CSSProperties {
@@ -282,10 +291,10 @@ function blockStyle(p: Record<string, unknown>, layout?: { padding?: string; ali
     color: typeof p.textColor === "string" && p.textColor ? p.textColor : undefined,
     fontFamily: fontFamily(p.font),
     textAlign: (layout?.align as React.CSSProperties["textAlign"]) || "left",
-    padding: pad,
+    padding: `${pad}px clamp(18px, 4vw, 56px)`,
   };
 }
-function headingStyle(p: Record<string, unknown>, fallback = 22): React.CSSProperties {
+function headingStyle(p: Record<string, unknown>, fallback = 28): React.CSSProperties {
   return {
     color: typeof p.headingColor === "string" && p.headingColor ? p.headingColor : undefined,
     fontSize: sizePx(p.headingSize, { sm: 18, md: fallback, lg: 30, xl: 38 }, fallback),
@@ -293,7 +302,7 @@ function headingStyle(p: Record<string, unknown>, fallback = 22): React.CSSPrope
     ...textRoleStyle(p, "heading"),
   };
 }
-function bodyStyle(p: Record<string, unknown>, fallback = 14): React.CSSProperties {
+function bodyStyle(p: Record<string, unknown>, fallback = 15): React.CSSProperties {
   return {
     color: typeof p.bodyColor === "string" && p.bodyColor ? p.bodyColor : undefined,
     fontSize: sizePx(p.bodySize, { sm: 12, md: fallback, lg: 17, xl: 20 }, fallback),
@@ -407,17 +416,17 @@ function Stars({ value = 5, size = 14 }: { value?: number; size?: number }) {
 function HeroPreview({ p, layout }: { p: Record<string, unknown>; layout: Block["layout"] }) {
   const href = safeHref(p.ctaHref);
   return (
-    <div className="lp-hero block-content" style={blockStyle(p, layout)}>
-      <Badge tone="brand" style={{ marginBottom: 14, color: cssColor(p, "eyebrowColor"), ...textRoleStyle(p, "eyebrow") }}><span className="dot" />{String(p.eyebrow || "Limited time")}</Badge>
-      <h1 style={headingStyle(p, 30)}>{String(p.title)}</h1>
-      {!!p.subtitle && <p style={bodyStyle(p, 14)}>{String(p.subtitle)}</p>}
-      {!!p.cta && (
-        <a href={href ?? "#"} onClick={e => e.preventDefault()} style={{ textDecoration: "none" }}>
-          <Button variant={(p.ctaVariant as "primary" | "secondary" | "ghost" | "outline") || "primary"} size="lg" style={buttonInlineStyle(p)}>
-            {String(p.cta)} <Icon name="arrow-right" />
-          </Button>
-        </a>
-      )}
+    <div className="tqr-section block-content" style={blockStyle(p, layout)}>
+      <div className="tqr-hero">
+        {!!p.eyebrow && <div className="tqr-eyebrow" style={{ color: cssColor(p, "eyebrowColor"), ...textRoleStyle(p, "eyebrow") }}>{String(p.eyebrow)}</div>}
+        <h1 style={headingStyle(p, 40)}>{String(p.title)}</h1>
+        {!!p.subtitle && <p style={bodyStyle(p, 17)}>{String(p.subtitle)}</p>}
+        {!!p.cta && (
+          <a href={href ?? "#"} onClick={e => e.preventDefault()} className={`tqr-btn ${String(p.ctaVariant ?? "primary")}`} style={buttonInlineStyle(p)}>
+            {String(p.cta)} →
+          </a>
+        )}
+      </div>
     </div>
   );
 }
@@ -431,13 +440,13 @@ function TimerPreview({ p, layout }: { p: Record<string, unknown>; layout: Block
   const parts = countdownParts(p.endsAt || p.endsIn, now);
   const labels = ["Days", "Hours", "Min", "Sec"];
   return (
-    <div className="block-content" style={blockStyle(p, layout)}>
-      {!!p.label && <div className="text-xs muted" style={{ textAlign: "center", padding: "16px 16px 0", fontFamily: "var(--ff-mono)", textTransform: "uppercase", letterSpacing: ".1em", fontSize: 10.5, color: cssColor(p, "eyebrowColor"), ...textRoleStyle(p, "eyebrow") }}>{String(p.label)}</div>}
-      <div className="lp-timer" style={{ background: "transparent", paddingInline: 0 }}>
+    <div className="tqr-section block-content" style={blockStyle(p, layout)}>
+      {!!p.label && <div className="tqr-eyebrow center" style={{ color: cssColor(p, "eyebrowColor"), ...textRoleStyle(p, "eyebrow") }}>{String(p.label)}</div>}
+      <div className="tqr-timer" data-countdown-target={String(p.endsAt || "")}>
         {parts.map((part, i) => (
-          <div key={i} className="lp-timer-unit">
-            <div className="lp-timer-num" style={{ color: accentColor(p) }}>{part}</div>
-            <div className="lp-timer-lbl">{labels[i]}</div>
+          <div key={i}>
+            <div className="num" style={{ color: accentColor(p) }}>{part}</div>
+            <div className="lbl">{labels[i]}</div>
           </div>
         ))}
       </div>
@@ -453,45 +462,61 @@ function ProductsPreview({ p, layout }: { p: Record<string, unknown>; layout: Bl
   const products = selectedProducts.length
     ? selectedProducts
     : Array.from({ length: Number(p.count) || 3 }, (_, i) => ({ id: `sample-${i}`, title: names[i % names.length], image: "" }));
-  const cols   = Math.min(Number(p.count) || 3, 4);
-  return (
-    <div className="block-content" style={blockStyle(p, layout)}>
-      <div style={{ fontFamily: "var(--ff-display)", fontWeight: 600, fontSize: 16, letterSpacing: "-0.012em", marginBottom: 12, ...headingStyle(p, 16) }}>{String(p.title)}</div>
-      {collection && <div className="field-hint" style={{ marginBottom: 10 }}>Collection: {collection.title}</div>}
-      <div className="lp-products" style={{ gridTemplateColumns: `repeat(${cols}, 1fr)`, padding: 0 }}>
-        {products.map((product, i) => (
-          <div key={product.id || i} className="lp-product" style={cardInlineStyle(p)}>
-            <div className="lp-product-img">
-              {product.image ? <img src={product.image} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} /> : <Icon name="image" size={24} />}
-            </div>
-            <div className="lp-product-info">
-              <div className="lp-product-name" style={{ color: cssColor(p, "cardTextColor") }}>{product.title}</div>
-              <div className="lp-product-price" style={{ color: cssColor(p, "priceColor") }}>{prices[i % prices.length]}</div>
-            </div>
+  if (collection && !selectedProducts.length) {
+    return (
+      <div className="tqr-section block-content" style={blockStyle(p, layout)}>
+        <h2 style={headingStyle(p)}>{String(p.title)}</h2>
+        <a className="tqr-collection-card" href="#" onClick={e => e.preventDefault()} style={cardInlineStyle(p)}>
+          <div className="tqr-collection-img">
+            {collection.image ? <img src={collection.image} alt="" /> : null}
           </div>
+          <div>
+            <div className="tqr-product-name" style={{ color: cssColor(p, "cardTextColor") }}>{collection.title}</div>
+            <div className="tqr-product-price" style={{ color: cssColor(p, "priceColor") }}>Collection</div>
+          </div>
+        </a>
+        <a href="#" onClick={e => e.preventDefault()} className="tqr-btn secondary" style={buttonInlineStyle(p)}>{String(p.cta || "Shop collection")} →</a>
+      </div>
+    );
+  }
+  return (
+    <div className="tqr-section block-content" style={blockStyle(p, layout)}>
+      <h2 style={headingStyle(p)}>{String(p.title)}</h2>
+      <div className="tqr-products">
+        {products.map((product, i) => (
+          <a key={product.id || i} className="tqr-product" href="#" onClick={e => e.preventDefault()} style={cardInlineStyle(p)}>
+            <div className="tqr-product-img">
+              {product.image ? <img src={product.image} alt="" /> : null}
+            </div>
+            <div className="tqr-product-name" style={{ color: cssColor(p, "cardTextColor") }}>{product.title}</div>
+            <div className="tqr-product-price" style={{ color: cssColor(p, "priceColor") }}>{prices[i % prices.length]}</div>
+          </a>
         ))}
       </div>
-      {(collection || selectedProducts.length > 0) && <Button variant="secondary" size="sm" iconRight="arrow-right" style={{ marginTop: 14, ...buttonInlineStyle(p) }}>{String(p.cta || "Shop selected")}</Button>}
+      {(collection || selectedProducts.length > 0) && <a href="#" onClick={e => e.preventDefault()} className="tqr-btn secondary" style={buttonInlineStyle(p)}>{String(p.cta || "Shop selected")} →</a>}
     </div>
   );
 }
 
 function CapturePreview({ p, layout }: { p: Record<string, unknown>; layout: Block["layout"] }) {
   return (
-    <div className="lp-capture block-content" style={{ ...blockStyle(p, layout), margin: 0, background: cssColor(p, "capturePanelBgColor") ?? blockStyle(p, layout).background, borderColor: cssColor(p, "capturePanelBorderColor") }}>
-      <h3 style={headingStyle(p, 16)}>{String(p.title)}</h3>
-      {!!p.subtitle && <p style={bodyStyle(p, 12)}>{String(p.subtitle)}</p>}
-      <div className="lp-capture-form">
-        <Input
-          placeholder={String(p.placeholder || "you@email.com")}
-          style={{
-            background: cssColor(p, "inputBgColor"),
-            color: cssColor(p, "inputTextColor"),
-            borderColor: cssColor(p, "inputBorderColor"),
-            "--placeholder-color": cssColor(p, "placeholderColor"),
-          } as React.CSSProperties}
-        />
-        <Button variant="primary" style={buttonInlineStyle(p)}>{String(p.cta || "Notify me")}</Button>
+    <div className="tqr-section block-content" style={blockStyle(p, layout)}>
+      <div className="tqr-capture" style={{ background: cssColor(p, "capturePanelBgColor"), borderColor: cssColor(p, "capturePanelBorderColor") }}>
+        <h3 style={headingStyle(p, 22)}>{String(p.title)}</h3>
+        {!!p.subtitle && <p style={bodyStyle(p)}>{String(p.subtitle)}</p>}
+        <div className="tqr-capture-form">
+          <input
+            type="email"
+            placeholder={String(p.placeholder || "you@email.com")}
+            style={{
+              background: cssColor(p, "inputBgColor"),
+              color: cssColor(p, "inputTextColor"),
+              borderColor: cssColor(p, "inputBorderColor"),
+              "--placeholder-color": cssColor(p, "placeholderColor"),
+            } as React.CSSProperties}
+          />
+          <button type="button" className="tqr-btn primary" style={buttonInlineStyle(p)}>{String(p.cta || "Notify me")}</button>
+        </div>
       </div>
     </div>
   );
@@ -499,51 +524,47 @@ function CapturePreview({ p, layout }: { p: Record<string, unknown>; layout: Blo
 
 function PromoPreview({ p, layout }: { p: Record<string, unknown>; layout: Block["layout"] }) {
   return (
-    <div className="lp-promo block-content" style={{ ...blockStyle(p, layout), margin: 0, borderColor: accentColor(p) }}>
-      <div className="text-xs strong" style={{ fontFamily: "var(--ff-mono)", textTransform: "uppercase", letterSpacing: ".08em", marginBottom: 6, color: cssColor(p, "eyebrowColor") ?? "var(--amber-fg)", ...textRoleStyle(p, "eyebrow") }}>{String(p.eyebrow || "Use code")}</div>
-      <div className="lp-promo-code" style={{ color: accentColor(p) }}>{String(p.code)}</div>
-      <div className="text-sm" style={{ marginTop: 6, ...bodyStyle(p, 14) }}>{String(p.title)}</div>
-      {!!p.cta && <Button variant="secondary" size="sm" iconRight="arrow-right" style={{ marginTop: 12, ...buttonInlineStyle(p) }}>{String(p.cta)}</Button>}
+    <div className="tqr-section block-content" style={blockStyle(p, layout)}>
+      {!!p.eyebrow && <div className="tqr-eyebrow" style={{ color: cssColor(p, "eyebrowColor"), ...textRoleStyle(p, "eyebrow") }}>{String(p.eyebrow)}</div>}
+      <div className="tqr-promo" style={{ color: accentColor(p), borderColor: accentColor(p) }}>{String(p.code)}</div>
+      <p style={bodyStyle(p)}>{String(p.title)}</p>
+      {!!p.cta && <a href="#" onClick={e => e.preventDefault()} className="tqr-btn secondary" style={buttonInlineStyle(p)}>{String(p.cta)}</a>}
     </div>
   );
 }
 
 function TextPreview({ p, layout }: { p: Record<string, unknown>; layout: { align: string } }) {
   return (
-    <div className="lp-text block-content" data-align={layout?.align || "left"} style={blockStyle(p, layout)}>
-      {!!p.heading && <h2 style={headingStyle(p)}>{String(p.heading)}</h2>}
-      {!!p.body && <p style={bodyStyle(p)}>{String(p.body)}</p>}
+    <div className="tqr-section block-content" style={blockStyle(p, layout)}>
+      {!!p.heading && <h2 style={headingStyle(p, 28)}>{String(p.heading)}</h2>}
+      {!!p.body && <p style={{ whiteSpace: "pre-line", ...bodyStyle(p) }}>{String(p.body)}</p>}
     </div>
   );
 }
 
 function ButtonPreview({ p, layout }: { p: Record<string, unknown>; layout: { align: string } }) {
   return (
-    <div className="lp-button-block block-content" data-align={layout?.align || "center"} style={blockStyle(p, layout)}>
-      <Button variant={(p.variant as "primary" | "secondary" | "ghost" | "outline") || "primary"} size="lg"
-        iconRight={p.icon ? "arrow-right" : undefined}>
-        {String(p.label || "Click me")}
-      </Button>
+    <div className="tqr-section block-content" style={blockStyle(p, layout)}>
+      <div className={layout?.align === "left" ? "" : layout?.align === "right" ? "right" : "center"}>
+        <a href="#" onClick={e => e.preventDefault()} className={`tqr-btn ${String(p.variant ?? "primary")}`} style={buttonInlineStyle(p)}>
+          {String(p.label || "Click me")}{p.icon ? " →" : ""}
+        </a>
+      </div>
     </div>
   );
 }
 
 function ImagePreview({ p, layout }: { p: Record<string, unknown>; layout: Block["layout"] }) {
   return (
-    <div className="lp-image block-content" style={blockStyle(p, layout)}>
-      <div className="lp-image-frame" data-aspect={String(p.aspect || "16:9")}>
-        {safeHref(p.src) ? (
-          <img src={String(p.src)} alt={String(p.alt || "")} style={{ width: "100%", height: "100%", objectFit: (p.fit as "cover" | "contain") || "cover", display: "block", position: "relative" }} />
-        ) : (
-          <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 6, position: "relative" }}>
-            <Icon name="image" size={36} />
-            <div style={{ fontSize: 10.5, fontFamily: "var(--ff-mono)", textTransform: "uppercase", letterSpacing: ".08em" }}>
-              {String(p.aspect || "16:9")} · placeholder
-            </div>
-          </div>
-        )}
-      </div>
-      {!!p.caption && <div className="lp-image-caption">{String(p.caption)}</div>}
+    <div className="tqr-section block-content" style={blockStyle(p, layout)}>
+      {safeHref(p.src) ? (
+        <div className="tqr-media" data-aspect={String(p.aspect || "16:9")}>
+          <img src={String(p.src)} alt={String(p.alt || "")} style={{ objectFit: (p.fit as "cover" | "contain") || "cover" }} />
+        </div>
+      ) : (
+        <div className="tqr-placeholder" data-aspect={String(p.aspect || "16:9")}>Image placeholder</div>
+      )}
+      {!!p.caption && <div className="tqr-caption">{String(p.caption)}</div>}
     </div>
   );
 }
@@ -551,15 +572,13 @@ function ImagePreview({ p, layout }: { p: Record<string, unknown>; layout: Block
 function VideoPreview({ p, layout }: { p: Record<string, unknown>; layout: Block["layout"] }) {
   const src = videoSrc(p.src);
   return (
-    <div className="lp-video block-content" style={blockStyle(p, layout)}>
-      {!!p.title && <div className="lp-video-title"><Icon name="video" size={13} /> {String(p.title)}</div>}
-      <div className="lp-video-frame">
-        {src ? (
-          src.match(/\.(mp4|webm|ogg)(\?.*)?$/i)
-            ? <video src={src} controls={p.controls !== false} muted autoPlay={!!p.autoplay} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
-            : <iframe src={src} title={String(p.title || "Video")} style={{ width: "100%", height: "100%", border: 0 }} allowFullScreen />
-        ) : <div className="lp-video-play"><Icon name="play" size={20} /></div>}
-      </div>
+    <div className="tqr-section block-content" style={blockStyle(p, layout)}>
+      {!!p.title && <h3>{String(p.title)}</h3>}
+      {src ? (
+        src.match(/\.(mp4|webm|ogg)(\?.*)?$/i)
+          ? <video src={src} controls={p.controls !== false} muted autoPlay={!!p.autoplay} style={{ width: "100%", aspectRatio: "16/9", borderRadius: 8 }} />
+          : <iframe src={src} title={String(p.title || "Video")} style={{ width: "100%", aspectRatio: "16/9", border: 0, borderRadius: 8 }} allowFullScreen />
+      ) : <div className="tqr-placeholder">Video placeholder</div>}
     </div>
   );
 }
@@ -568,20 +587,18 @@ function ReviewsPreview({ p, layout }: { p: Record<string, unknown>; layout: { a
   const items = (p.items as Array<{ rating: number; name: string; text: string; verified?: boolean }>) || [];
   const avg = items.reduce((s, r) => s + (r.rating || 5), 0) / Math.max(items.length, 1);
   return (
-    <div className="lp-reviews block-content" data-align={layout?.align || "center"} style={blockStyle(p, layout)}>
-      <div className="lp-reviews-head">
-        <h2 style={headingStyle(p, 18)}>{String(p.title || "What customers say")}</h2>
-        <div className="lp-reviews-rating">
-          <span className="lp-reviews-stars"><Stars value={Math.round(avg)} /></span>
+    <div className="tqr-section block-content" style={blockStyle(p, layout)}>
+      <h2 style={{ textAlign: "center", ...headingStyle(p) }}>{String(p.title || "What customers say")}</h2>
+      <div className="tqr-reviews-meta">
+        <span className="stars" style={{ color: accentColor(p) }}>{"★".repeat(Math.round(avg))}</span>
           <span>{avg.toFixed(1)} · {items.length} reviews</span>
-        </div>
       </div>
-      <div className="lp-reviews-grid" style={{ gridTemplateColumns: `repeat(${Math.min(items.length, 3)}, 1fr)` }}>
+      <div className="tqr-reviews">
         {items.slice(0, 3).map((r, i) => (
-          <div key={i} className="lp-review-card" style={cardInlineStyle(p)}>
-            <div className="stars" style={{ color: accentColor(p) }}><Stars value={r.rating || 5} size={12} /></div>
+          <div key={i} className="tqr-review" style={cardInlineStyle(p)}>
+            <div className="stars" style={{ color: accentColor(p) }}>{"★".repeat(r.rating || 5)}</div>
             <p style={{ color: cssColor(p, "cardTextColor") }}>&quot;{r.text}&quot;</p>
-            <div className="name">— {r.name}{r.verified && <span className="verified">✓ Verified</span>}</div>
+            <div className="name">— {r.name}{r.verified ? " · ✓ Verified" : ""}</div>
           </div>
         ))}
       </div>
@@ -592,13 +609,13 @@ function ReviewsPreview({ p, layout }: { p: Record<string, unknown>; layout: { a
 function FaqPreview({ p, layout }: { p: Record<string, unknown>; layout: Block["layout"] }) {
   const items = (p.items as Array<{ q: string; a: string }>) || [];
   return (
-    <div className="lp-faq block-content" style={blockStyle(p, layout)}>
-      {!!p.title && <h2 style={headingStyle(p, 18)}>{String(p.title)}</h2>}
+    <div className="tqr-section block-content" style={blockStyle(p, layout)}>
+      {!!p.title && <h2 style={headingStyle(p, 28)}>{String(p.title)}</h2>}
       {items.map((it, i) => (
-        <div key={i} className="lp-faq-item">
-          <div className="lp-faq-q"><span>{it.q}</span><Icon name="chevron-down" size={14} /></div>
-          {(p.expanded || i === 0) && it.a && <div className="lp-faq-a">{it.a}</div>}
-        </div>
+        <details key={i} open={!!p.expanded || i === 0}>
+          <summary>{it.q}</summary>
+          <p style={bodyStyle(p)}>{it.a}</p>
+        </details>
       ))}
     </div>
   );
@@ -606,9 +623,10 @@ function FaqPreview({ p, layout }: { p: Record<string, unknown>; layout: Block["
 
 function UrgencyPreview({ p, layout }: { p: Record<string, unknown>; layout: Block["layout"] }) {
   return (
-    <div className="lp-urgency block-content" data-tone={String(p.tone || "danger")} style={blockStyle(p, layout)}>
-      <Icon name={String(p.icon || "alert-triangle")} size={15} />
-      <span><b>{String(p.label || "Hurry")}</b> · {String(p.message)}</span>
+    <div className="tqr-section block-content" style={blockStyle(p, layout)}>
+      <div className={`tqr-urgency ${String(p.tone ?? "danger")}`}>
+        <b>{String(p.label || "Hurry")}</b> {String(p.message)}
+      </div>
     </div>
   );
 }
@@ -617,20 +635,19 @@ function QrPreview({ p, layout, qrChoices }: { p: Record<string, unknown>; layou
   const selected = qrChoices.find(q => q.id === p.qrId);
   const svg = selected ? renderQrSvg(selected.scanUrl, qrRenderOpts(selected.design, selected.label, qrBlockSize(p.size))) : "";
   return (
-    <div className="lp-qr-block block-content" style={blockStyle(p, layout)}>
-      <h3 style={headingStyle(p, 16)}>{String(p.title || "Scan to continue")}</h3>
-      {!!p.subtitle && <div className="sub" style={bodyStyle(p, 12)}>{String(p.subtitle)}</div>}
-      {selected ? (
-        <>
-          <div className="qr-render-output lp-qr-block-canvas" data-size={String(p.size || "md")} dangerouslySetInnerHTML={{ __html: svg }} />
-          <div className="field-hint" style={{ marginTop: 8 }}>{selected.name}</div>
-        </>
-      ) : (
-        <div className="lp-empty-state">
-          <Icon name="qr-code" size={20} />
-          <span>{qrChoices.length ? "Select a QR code in the properties panel." : "Create a QR code first, then select it here."}</span>
-        </div>
-      )}
+    <div className="tqr-section block-content" style={blockStyle(p, layout)}>
+      <div className="center">
+        {!!p.title && <h3 style={headingStyle(p, 22)}>{String(p.title || "Scan to continue")}</h3>}
+        {!!p.subtitle && <p style={bodyStyle(p)}>{String(p.subtitle)}</p>}
+        {selected ? (
+          <div className={`qr-render-output tqr-qr ${String(p.size || "md")}`} dangerouslySetInnerHTML={{ __html: svg }} />
+        ) : (
+          <div className="lp-empty-state">
+            <Icon name="qr-code" size={20} />
+            <span>{qrChoices.length ? "Select a QR code in the properties panel." : "Create a QR code first, then select it here."}</span>
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -655,6 +672,90 @@ function renderBlock(b: Block, qrChoices: MerchantQrChoice[]) {
     case "qr":       return <QrPreview p={p} layout={l} qrChoices={qrChoices} />;
     default:         return <div style={{ padding: 32, textAlign: "center", color: "var(--fg-muted)" }}>Unknown block</div>;
   }
+}
+
+function socialLinks(settings: CampaignPageSettings) {
+  return [
+    { key: "instagram", label: "Instagram", path: siInstagram.path, color: `#${siInstagram.hex}`, href: settings.instagramUrl },
+    { key: "tiktok", label: "TikTok", path: siTiktok.path, color: `#${siTiktok.hex}`, href: settings.tiktokUrl },
+    { key: "facebook", label: "Facebook", path: siFacebook.path, color: `#${siFacebook.hex}`, href: settings.facebookUrl },
+    { key: "x", label: "X", path: siX.path, color: `#${siX.hex}`, href: settings.xUrl },
+    { key: "website", label: "Website", path: "M10.5 13.5a4.5 4.5 0 0 1 0-6.36l2.12-2.12a4.5 4.5 0 1 1 6.36 6.36l-1.06 1.06-1.41-1.41 1.06-1.06a2.5 2.5 0 0 0-3.54-3.54l-2.12 2.12a2.5 2.5 0 0 0 0 3.54l-1.41 1.41Zm3 3a4.5 4.5 0 0 1 0-6.36l1.06-1.06 1.41 1.41-1.06 1.06a2.5 2.5 0 0 0 3.54 3.54l2.12-2.12a2.5 2.5 0 0 0 0-3.54l1.41-1.41a4.5 4.5 0 0 1 0 6.36l-2.12 2.12a4.5 4.5 0 0 1-6.36 0Z", color: settings.socialIconColor || "currentColor", href: settings.websiteUrl },
+  ].filter(item => item.href.trim());
+}
+
+function SocialIcon({ path }: { path: string }) {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <path d={path} fill="currentColor" />
+    </svg>
+  );
+}
+
+function footerStyle(settings: CampaignPageSettings): React.CSSProperties {
+  return {
+    "--tqr-footer-bg": settings.footerBgColor || "transparent",
+    "--tqr-footer-text": settings.footerTextColor || "var(--tqr-page-text, #E2E8F0)",
+    "--tqr-footer-credit": settings.footerCreditColor || "color-mix(in srgb, var(--tqr-page-text, #E2E8F0) 54%, transparent)",
+    "--tqr-footer-border": settings.footerBorderColor || "color-mix(in srgb, var(--tqr-page-text, #E2E8F0) 12%, transparent)",
+    "--tqr-footer-icon": settings.socialIconColor || "var(--tqr-page-text, #E2E8F0)",
+    "--tqr-powered-text": settings.poweredTextColor || "color-mix(in srgb, var(--tqr-page-text, #E2E8F0) 62%, transparent)",
+    "--tqr-powered-mark-bg": settings.poweredMarkBgColor || "var(--tqr-accent, #2563EB)",
+  } as React.CSSProperties;
+}
+
+function CampaignBrandBar({ settings, fallbackName }: { settings: CampaignPageSettings; fallbackName: string }) {
+  if (!settings.logoImageUrl && !settings.logoText) return null;
+  return (
+    <div className="tqr-brand-bar" data-align={settings.logoPosition}>
+      <div className="tqr-brand-lockup">
+        {settings.logoImageUrl ? <img src={settings.logoImageUrl} alt="" /> : null}
+        <span>{settings.logoText || fallbackName}</span>
+      </div>
+    </div>
+  );
+}
+
+function TrackQrWatermark() {
+  return (
+    <div className="tqr-powered">
+      <img className="tqr-powered-logo" src="/TrackQr.png" alt="" />
+      <span>Powered by <b>TrackQR</b></span>
+    </div>
+  );
+}
+
+function CampaignFooterPreview({ settings }: { settings: CampaignPageSettings }) {
+  const links = socialLinks(settings);
+  const hasMerchantFooter = settings.footerEnabled && (settings.footerText || settings.creditText || links.length);
+  if (!hasMerchantFooter && !settings.showPoweredBy) return null;
+  return (
+    <footer className="tqr-campaign-footer" style={footerStyle(settings)}>
+      {hasMerchantFooter && (
+        <div className="tqr-footer-inner">
+          <div className="tqr-footer-copy">
+            {settings.footerText ? <p>{settings.footerText}</p> : null}
+            {settings.creditText ? <span className="tqr-credit">{settings.creditText}</span> : null}
+          </div>
+          {links.length ? (
+            <div className="tqr-socials">
+              {links.map(link => (
+                <span
+                  key={link.key}
+                  className="tqr-social-link"
+                  title={link.label}
+                  style={{ color: settings.socialIconColorMode === "brand" ? link.color : undefined }}
+                >
+                  <SocialIcon path={link.path} />
+                </span>
+              ))}
+            </div>
+          ) : null}
+        </div>
+      )}
+      {settings.showPoweredBy && <TrackQrWatermark />}
+    </footer>
+  );
 }
 
 /* ══════════════ Repeater ══════════════ */
@@ -825,18 +926,16 @@ function ButtonFields({ p, set }: { p: Record<string, unknown>; set: (k: string,
     </div>
   </>);
 }
-function ImageFields({ p, set, actions }: { p: Record<string, unknown>; set: (k: string, v: unknown) => void; actions: BlockEditorActions }) {
+function ImageFields({ p, set, setMany, actions }: { p: Record<string, unknown>; set: BlockPropSetter; setMany: BlockPropsSetter; actions: BlockEditorActions }) {
   return (<>
     <Field label="Image" hint="Uploads to Cloudinary and uses the hosted asset in the campaign.">
       <ImageUploadControl
         value={String(p.src || "")}
         onUploaded={asset => {
-          set("src", asset.url);
-          set("assetId", asset.assetId);
+          setMany({ src: asset.url, assetId: asset.assetId });
         }}
         onClear={() => {
-          set("src", "");
-          set("assetId", "");
+          setMany({ src: "", assetId: "" });
         }}
         actions={actions}
       />
@@ -977,25 +1076,25 @@ function ColorPicker({ value, onChange, allowEmpty = true }: { value?: string; o
   );
 }
 
-function RichTypographyControl({ p, role, set }: {
+function RichTypographyControl({ p, textRole, set }: {
   p: Record<string, unknown>;
-  role: "heading" | "body" | "eyebrow" | "button";
+  textRole: "heading" | "body" | "eyebrow" | "button";
   set: (k: string, v: unknown) => void;
 }) {
-  const fontKey = `${role}Font`;
-  const sizeKey = `${role}FontSize`;
-  const boldKey = `${role}Bold`;
-  const italicKey = `${role}Italic`;
-  const underlineKey = `${role}Underline`;
-  const alignKey = `${role}Align`;
+  const fontKey = `${textRole}Font`;
+  const sizeKey = `${textRole}FontSize`;
+  const boldKey = `${textRole}Bold`;
+  const italicKey = `${textRole}Italic`;
+  const underlineKey = `${textRole}Underline`;
+  const alignKey = `${textRole}Align`;
   const fontValue = String(p[fontKey] || DEFAULT_FONT);
   const fontSpec = getLabelFont(fontValue);
-  const defaultSize = role === "heading" ? 20 : role === "eyebrow" ? 12 : 14;
+  const defaultSize = textRole === "heading" ? 20 : textRole === "eyebrow" ? 12 : 14;
   const sizeValue = Number(p[sizeKey]) || defaultSize;
   const alignValue = (p[alignKey] as "left" | "center" | "right" | undefined) || "center";
 
   return (
-    <div className="rte-bar" role="toolbar" aria-label={`${role} formatting`}>
+    <div className="rte-bar" role="toolbar" aria-label={`${textRole} formatting`}>
       <select
         className="rte-select"
         value={fontValue}
@@ -1155,7 +1254,7 @@ function ImageUploadControl({ value, onUploaded, actions, onClear }: {
   );
 }
 
-function BlockStyleFields({ block, set, actions }: { block: Block; set: (k: string, v: unknown) => void; actions: BlockEditorActions }) {
+function BlockStyleFields({ block, set, setMany, actions }: { block: Block; set: BlockPropSetter; setMany: BlockPropsSetter; actions: BlockEditorActions }) {
   const p = block.props;
   const showHeading = ["hero", "products", "capture", "text", "faq", "reviews", "qr"].includes(block.type);
   const showBody = ["hero", "capture", "promo", "text", "qr"].includes(block.type);
@@ -1163,10 +1262,10 @@ function BlockStyleFields({ block, set, actions }: { block: Block; set: (k: stri
   const showCards = ["products", "reviews"].includes(block.type);
   return (
     <>
-      {showHeading && <Field label={block.type === "hero" ? "Title typography" : "Heading typography"}><RichTypographyControl p={p} role="heading" set={set} /></Field>}
-      {showBody && <Field label={block.type === "hero" ? "Subtitle typography" : "Body typography"}><RichTypographyControl p={p} role="body" set={set} /></Field>}
-      {["hero", "promo", "timer"].includes(block.type) && <Field label="Eyebrow / label typography"><RichTypographyControl p={p} role="eyebrow" set={set} /></Field>}
-      {showButton && <Field label="Button typography"><RichTypographyControl p={p} role="button" set={set} /></Field>}
+      {showHeading && <Field label={block.type === "hero" ? "Title typography" : "Heading typography"}><RichTypographyControl p={p} textRole="heading" set={set} /></Field>}
+      {showBody && <Field label={block.type === "hero" ? "Subtitle typography" : "Body typography"}><RichTypographyControl p={p} textRole="body" set={set} /></Field>}
+      {["hero", "promo", "timer"].includes(block.type) && <Field label="Eyebrow / label typography"><RichTypographyControl p={p} textRole="eyebrow" set={set} /></Field>}
+      {showButton && <Field label="Button typography"><RichTypographyControl p={p} textRole="button" set={set} /></Field>}
       {showHeading && <Field label={block.type === "hero" ? "Title color" : "Heading color"}><ColorPicker value={p.headingColor as string | undefined} onChange={v => set("headingColor", v)} /></Field>}
       {showBody && <Field label={block.type === "hero" ? "Subtitle color" : "Body text color"}><ColorPicker value={p.bodyColor as string | undefined} onChange={v => set("bodyColor", v)} /></Field>}
       {["hero", "promo", "timer"].includes(block.type) && <Field label="Eyebrow / label color"><ColorPicker value={p.eyebrowColor as string | undefined} onChange={v => set("eyebrowColor", v)} /></Field>}
@@ -1204,12 +1303,10 @@ function BlockStyleFields({ block, set, actions }: { block: Block; set: (k: stri
         <ImageUploadControl
           value={String(p.bgImageUrl || "")}
           onUploaded={asset => {
-            set("bgImageUrl", asset.url);
-            set("bgImageAssetId", asset.assetId);
+            setMany({ bgImageUrl: asset.url, bgImageAssetId: asset.assetId });
           }}
           onClear={() => {
-            set("bgImageUrl", "");
-            set("bgImageAssetId", "");
+            setMany({ bgImageUrl: "", bgImageAssetId: "" });
           }}
           actions={actions}
         />
@@ -1236,7 +1333,7 @@ function BlockStyleFields({ block, set, actions }: { block: Block; set: (k: stri
   );
 }
 
-function BlockFields({ block, set, actions, qrChoices }: { block: Block; set: (k: string, v: unknown) => void; actions: BlockEditorActions; qrChoices: MerchantQrChoice[] }) {
+function BlockFields({ block, set, setMany, actions, qrChoices }: { block: Block; set: BlockPropSetter; setMany: BlockPropsSetter; actions: BlockEditorActions; qrChoices: MerchantQrChoice[] }) {
   const p = block.props;
   switch (block.type) {
     case "hero":     return <HeroFields p={p} set={set} />;
@@ -1246,7 +1343,7 @@ function BlockFields({ block, set, actions, qrChoices }: { block: Block; set: (k
     case "promo":    return <PromoFields p={p} set={set} />;
     case "text":     return <TextFields p={p} set={set} />;
     case "button":   return <ButtonFields p={p} set={set} />;
-    case "image":    return <ImageFields p={p} set={set} actions={actions} />;
+    case "image":    return <ImageFields p={p} set={set} setMany={setMany} actions={actions} />;
     case "video":    return <VideoFields p={p} set={set} />;
     case "reviews":  return <ReviewsFields p={p} set={set} />;
     case "faq":      return <FaqFields p={p} set={set} />;
@@ -1254,6 +1351,166 @@ function BlockFields({ block, set, actions, qrChoices }: { block: Block; set: (k
     case "qr":       return <QrFields p={p} set={set} qrChoices={qrChoices} />;
     default:         return null;
   }
+}
+
+function PageSettingsPanel({ settings, update, actions, isTrial }: {
+  settings: CampaignPageSettings;
+  update: <K extends keyof CampaignPageSettings>(key: K, value: CampaignPageSettings[K]) => void;
+  actions: BlockEditorActions;
+  isTrial: boolean;
+}) {
+  return (
+    <>
+      <div className="prop-section">
+        <div className="flex items-center gap-3">
+          <div className="block-item-icon" style={{
+            background: "var(--accent-soft)",
+            color: "var(--accent)",
+            borderColor: "var(--accent-border)",
+            width: 32,
+            height: 32,
+          }}>
+            <Icon name="settings" size={15} />
+          </div>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div className="strong text-sm">Page settings</div>
+            <div className="text-xs muted">Global layout, brand and footer for this campaign.</div>
+          </div>
+        </div>
+      </div>
+
+      <div className="prop-section">
+        <div className="prop-section-label">Layout</div>
+        <Field label="Desktop width">
+          <Segmented
+            value={settings.layout}
+            onChange={v => update("layout", v as CampaignPageSettings["layout"])}
+            options={[
+              { value: "contained", label: "Contained" },
+              { value: "wide", label: "Wide" },
+              { value: "full", label: "Full" },
+            ]}
+          />
+        </Field>
+        <Field label="Theme">
+          <Segmented
+            value={settings.theme}
+            onChange={v => update("theme", v as CampaignPageSettings["theme"])}
+            options={[
+              { value: "dark", label: "Dark" },
+              { value: "light", label: "Light" },
+            ]}
+          />
+        </Field>
+      </div>
+
+      <div className="prop-section">
+        <div className="prop-section-label">Colors</div>
+        <Field label="Accent color">
+          <ColorPicker value={settings.accentColor} onChange={v => update("accentColor", v || DEFAULT_CAMPAIGN_PAGE_SETTINGS.accentColor)} allowEmpty={false} />
+        </Field>
+        <Field label="Page background">
+          <ColorPicker value={settings.pageBgColor || undefined} onChange={v => update("pageBgColor", v || "")} />
+        </Field>
+        <Field label="Default text color">
+          <ColorPicker value={settings.textColor || undefined} onChange={v => update("textColor", v || "")} />
+        </Field>
+      </div>
+
+      <div className="prop-section">
+        <div className="prop-section-label">Campaign logo</div>
+        <Field label="Logo image">
+          <ImageUploadControl
+            value={settings.logoImageUrl}
+            onUploaded={asset => update("logoImageUrl", asset.url)}
+            onClear={() => update("logoImageUrl", "")}
+            actions={actions}
+          />
+        </Field>
+        <Field label="Logo text" hint="Used beside the image, or alone when no image is uploaded.">
+          <Input value={settings.logoText} onChange={e => update("logoText", e.target.value)} placeholder="Aurora Studio" />
+        </Field>
+        <Field label="Logo position">
+          <Segmented
+            value={settings.logoPosition}
+            onChange={v => update("logoPosition", v as CampaignPageSettings["logoPosition"])}
+            options={[
+              { value: "left", label: "Left" },
+              { value: "center", label: "Center" },
+              { value: "right", label: "Right" },
+            ]}
+          />
+        </Field>
+      </div>
+
+      <div className="prop-section" style={{ borderBottom: 0 }}>
+        <div className="prop-section-label">Footer</div>
+        <div className="prop-row prop-row-h">
+          <span className="prop-label">Show campaign footer</span>
+          <EditorToggle on={settings.footerEnabled} onChange={v => update("footerEnabled", v)} />
+        </div>
+        <Field label="Footer text">
+          <Input value={settings.footerText} onChange={e => update("footerText", e.target.value)} placeholder="Join the drop before it closes." />
+        </Field>
+        <Field label="Merchant credit">
+          <Input value={settings.creditText} onChange={e => update("creditText", e.target.value)} placeholder="© 2026 Aurora Studio" />
+        </Field>
+        <div className="grid grid-2">
+          <Field label="Footer background">
+            <ColorPicker value={settings.footerBgColor || undefined} onChange={v => update("footerBgColor", v || "")} />
+          </Field>
+          <Field label="Footer border">
+            <ColorPicker value={settings.footerBorderColor || undefined} onChange={v => update("footerBorderColor", v || "")} />
+          </Field>
+          <Field label="Footer text color">
+            <ColorPicker value={settings.footerTextColor || undefined} onChange={v => update("footerTextColor", v || "")} />
+          </Field>
+          <Field label="Credit color">
+            <ColorPicker value={settings.footerCreditColor || undefined} onChange={v => update("footerCreditColor", v || "")} />
+          </Field>
+        </div>
+        <Field label="Social icon colors">
+          <Segmented
+            value={settings.socialIconColorMode}
+            onChange={v => update("socialIconColorMode", v as CampaignPageSettings["socialIconColorMode"])}
+            options={[
+              { value: "custom", label: "Custom" },
+              { value: "brand", label: "Original" },
+            ]}
+          />
+        </Field>
+        {settings.socialIconColorMode === "custom" && (
+          <Field label="Social icon color">
+            <ColorPicker value={settings.socialIconColor || undefined} onChange={v => update("socialIconColor", v || "")} />
+          </Field>
+        )}
+        <div className="grid grid-2">
+          <Field label="Instagram">
+            <Input value={settings.instagramUrl} onChange={e => update("instagramUrl", e.target.value)} placeholder="https://instagram.com/..." />
+          </Field>
+          <Field label="TikTok">
+            <Input value={settings.tiktokUrl} onChange={e => update("tiktokUrl", e.target.value)} placeholder="https://tiktok.com/..." />
+          </Field>
+          <Field label="Facebook">
+            <Input value={settings.facebookUrl} onChange={e => update("facebookUrl", e.target.value)} placeholder="https://facebook.com/..." />
+          </Field>
+          <Field label="X / Twitter">
+            <Input value={settings.xUrl} onChange={e => update("xUrl", e.target.value)} placeholder="https://x.com/..." />
+          </Field>
+        </div>
+        <Field label="Website">
+          <Input value={settings.websiteUrl} onChange={e => update("websiteUrl", e.target.value)} placeholder="https://your-store.com" />
+        </Field>
+        <Field label="Watermark text">
+          <ColorPicker value={settings.poweredTextColor || undefined} onChange={v => update("poweredTextColor", v || "")} />
+        </Field>
+        <div className="prop-row prop-row-h">
+          <span className="prop-label">Powered by TrackQR watermark</span>
+          <Badge>{isTrial ? "Visible on trial" : "Hidden on paid plan"}</Badge>
+        </div>
+      </div>
+    </>
+  );
 }
 
 /* ══════════════ PropSection ══════════════ */
@@ -1292,9 +1549,10 @@ function BgSwatchPicker({ value, onChange }: { value: string; onChange: (v: stri
 }
 
 /* ══════════════ PropertiesPanel ══════════════ */
-function PropertiesPanel({ block, updateProp, updateLayout, updateVisibility, onDelete, onDuplicate, collapsed, setCollapsed, actions, qrChoices }: {
+function PropertiesPanel({ block, updateProp, updateProps, updateLayout, updateVisibility, onDelete, onDuplicate, collapsed, setCollapsed, actions, qrChoices }: {
   block: Block;
-  updateProp: (k: string, v: unknown) => void;
+  updateProp: BlockPropSetter;
+  updateProps: BlockPropsSetter;
   updateLayout: (k: string, v: unknown) => void;
   updateVisibility: (k: string, v: unknown) => void;
   onDelete: () => void;
@@ -1327,12 +1585,33 @@ function PropertiesPanel({ block, updateProp, updateLayout, updateVisibility, on
 
     {/* Content */}
     <PropSection label="Content" k="content" collapsed={collapsed} setCollapsed={setCollapsed}>
-      <BlockFields block={block} set={updateProp} actions={actions} qrChoices={qrChoices} />
+      <BlockFields block={block} set={updateProp} setMany={updateProps} actions={actions} qrChoices={qrChoices} />
+    </PropSection>
+
+    {/* Layout */}
+    <PropSection label="Layout" k="layout" collapsed={collapsed} setCollapsed={setCollapsed}>
+      <Field label="Alignment">
+        <Segmented
+          value={block.layout?.align || "left"}
+          onChange={v => updateLayout("align", v)}
+          options={ALIGN_OPTS}
+        />
+      </Field>
+      <Field label="Spacing">
+        <Segmented
+          value={block.layout?.padding || "md"}
+          onChange={v => updateLayout("padding", v)}
+          options={PADDING_OPTS}
+        />
+      </Field>
+      <Field label="Background preset">
+        <BgSwatchPicker value={block.layout?.bg || "surface"} onChange={v => updateLayout("bg", v)} />
+      </Field>
     </PropSection>
 
     {/* Style */}
     <PropSection label="Style" k="style" collapsed={collapsed} setCollapsed={setCollapsed}>
-      <BlockStyleFields block={block} set={updateProp} actions={actions} />
+      <BlockStyleFields block={block} set={updateProp} setMany={updateProps} actions={actions} />
     </PropSection>
 
     {/* Visibility */}
@@ -1456,12 +1735,14 @@ function EditorTopBar({ campaignName, setCampaignName, device, setDevice, onNavi
 export default function CampaignEditor() {
   const navigate = useNavigate();
   const toast    = useToast();
-  const { campaign, qrChoices } = useLoaderData<typeof loader>();
+  const { campaign, qrChoices, isTrial } = useLoaderData<typeof loader>();
   const fetcher = useFetcher<typeof action>();
 
   const initialBlocks: Block[] = (campaign.blocks?.length ? campaign.blocks : STARTER_BLOCKS.map(makeBlock)) as Block[];
+  const initialPageSettings = normalizeCampaignPageSettings(campaign.settings);
 
   const [blocks,       setBlocks]       = useState<Block[]>(initialBlocks);
+  const [pageSettings, setPageSettings] = useState<CampaignPageSettings>(initialPageSettings);
   const [device,       setDevice]       = useState<DeviceType>("desktop");
   const [selectedId,   setSelectedId]   = useState<string | null>(null);
   const [campaignName, setCampaignName] = useState(campaign.name);
@@ -1474,6 +1755,7 @@ export default function CampaignEditor() {
   const [saveState,    setSaveState]    = useState<"idle" | "saving" | "saved" | "error">("idle");
   const dragRef = useRef<{ source: "library"; type: BlockType } | { source: "block"; id: string } | null>(null);
   const lastSavedJson = useRef<string>(JSON.stringify(initialBlocks));
+  const lastSavedSettingsJson = useRef<string>(JSON.stringify(initialPageSettings));
   const lastSavedName = useRef<string>(campaign.name);
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const merchantQrChoices = qrChoices as MerchantQrChoice[];
@@ -1486,23 +1768,26 @@ export default function CampaignEditor() {
   // Debounced autosave (1.2s)
   useEffect(() => {
     const json = JSON.stringify(blocks);
-    if (json === lastSavedJson.current && campaignName === lastSavedName.current) return;
+    const settingsJson = JSON.stringify(pageSettings);
+    if (json === lastSavedJson.current && settingsJson === lastSavedSettingsJson.current && campaignName === lastSavedName.current) return;
     if (saveTimer.current) clearTimeout(saveTimer.current);
     setSaveState("idle");
     saveTimer.current = setTimeout(() => {
-      doSave(blocks, campaignName);
+      doSave(blocks, campaignName, pageSettings);
     }, 1200);
     return () => { if (saveTimer.current) clearTimeout(saveTimer.current); };
-  }, [blocks, campaignName]);
+  }, [blocks, pageSettings, campaignName]);
 
-  function doSave(nextBlocks: Block[], nextName: string) {
+  function doSave(nextBlocks: Block[], nextName: string, nextSettings: CampaignPageSettings) {
     setSaveState("saving");
     const fd = new FormData();
     fd.set("intent", "save");
     fd.set("blocks", JSON.stringify(nextBlocks));
+    fd.set("settings", JSON.stringify(nextSettings));
     fd.set("name", nextName);
     fetcher.submit(fd, { method: "post" });
     lastSavedJson.current = JSON.stringify(nextBlocks);
+    lastSavedSettingsJson.current = JSON.stringify(nextSettings);
     lastSavedName.current = nextName;
   }
 
@@ -1522,9 +1807,11 @@ export default function CampaignEditor() {
     const fd = new FormData();
     fd.set("intent", "publish");
     fd.set("blocks", JSON.stringify(blocks));
+    fd.set("settings", JSON.stringify(pageSettings));
     fd.set("name", campaignName);
     fetcher.submit(fd, { method: "post" });
     lastSavedJson.current = JSON.stringify(blocks);
+    lastSavedSettingsJson.current = JSON.stringify(pageSettings);
     lastSavedName.current = campaignName;
     toast({ title: "Activating…", desc: "Your campaign page is going live." });
   }
@@ -1538,7 +1825,7 @@ export default function CampaignEditor() {
 
   function manualSave() {
     if (saveTimer.current) clearTimeout(saveTimer.current);
-    doSave(blocks, campaignName);
+    doSave(blocks, campaignName, pageSettings);
   }
 
   function resourceToPicked(item: Record<string, unknown>): ShopifyPickedResource {
@@ -1598,6 +1885,13 @@ export default function CampaignEditor() {
   };
 
   const selected    = blocks.find(b => b.id === selectedId) ?? null;
+  const pageSelected = selectedId === PAGE_SETTINGS_ID;
+  const effectivePageSettings = campaignPageSettingsForPlan(pageSettings, isTrial);
+  const pageCanvasStyle = {
+    "--editor-page-accent": effectivePageSettings.accentColor,
+    background: effectivePageSettings.pageBgColor || (effectivePageSettings.theme === "light" ? "#F8FAFC" : "#0B1220"),
+    color: effectivePageSettings.textColor || (effectivePageSettings.theme === "light" ? "#0B1220" : "#E2E8F0"),
+  } as React.CSSProperties;
 
   /* ── History helpers ── */
   const commit = (next: Block[]) => {
@@ -1626,6 +1920,10 @@ export default function CampaignEditor() {
     if (!selected) return;
     commit(blocks.map(b => b.id === selectedId ? { ...b, props: { ...b.props, [key]: value } } : b));
   };
+  const updateProps = (values: Record<string, unknown>) => {
+    if (!selected) return;
+    commit(blocks.map(b => b.id === selectedId ? { ...b, props: { ...b.props, ...values } } : b));
+  };
   const updateLayout = (key: string, value: unknown) => {
     if (!selected) return;
     commit(blocks.map(b => b.id === selectedId ? { ...b, layout: { ...b.layout, [key]: value } } : b));
@@ -1633,6 +1931,9 @@ export default function CampaignEditor() {
   const updateVisibility = (key: string, value: unknown) => {
     if (!selected) return;
     commit(blocks.map(b => b.id === selectedId ? { ...b, visibility: { ...b.visibility, [key]: value } } : b));
+  };
+  const updatePageSetting = <K extends keyof CampaignPageSettings>(key: K, value: CampaignPageSettings[K]) => {
+    setPageSettings(current => ({ ...current, [key]: value }));
   };
 
   const moveBlock = (id: string, dir: number) => {
@@ -1726,7 +2027,7 @@ export default function CampaignEditor() {
   }, [selected, selectedId, blocks, history]);
 
   return (
-    <div style={{ padding: "20px 24px 32px" }}>
+    <div className="campaign-editor-page">
       <EditorTopBar
         campaignName={campaignName}
         setCampaignName={setCampaignName}
@@ -1758,6 +2059,17 @@ export default function CampaignEditor() {
             </div>
           </div>
           <div className="editor-blocks scroll">
+            <button
+              type="button"
+              className={`block-item ${pageSelected ? "selected" : ""}`}
+              onClick={() => setSelectedId(PAGE_SETTINGS_ID)}
+              title="Edit page settings"
+            >
+              <div className="block-item-icon"><Icon name="settings" /></div>
+              <span style={{ flex: 1 }}>Page settings</span>
+              <span className="tone-pill blue" />
+            </button>
+            <div className="block-library-divider" />
             {filteredLibrary.length === 0 ? (
               <div className="block-palette-empty">No blocks match &quot;{search}&quot;</div>
             ) : filteredLibrary.map(b => (
@@ -1781,7 +2093,8 @@ export default function CampaignEditor() {
 
         {/* ══ CENTER — Canvas ══ */}
         <div className="editor-canvas scroll">
-          <div className="editor-frame" data-device={device}>
+          <div className="editor-frame" data-device={device} data-page-layout={effectivePageSettings.layout} data-page-theme={effectivePageSettings.theme} style={pageCanvasStyle}>
+            <CampaignBrandBar settings={effectivePageSettings} fallbackName={campaignName} />
             {blocks.length === 0 && (
               <div className="canvas-empty">
                 <Icon name="layers" size={28} />
@@ -1824,6 +2137,7 @@ export default function CampaignEditor() {
                     data-padding={b.layout?.padding}
                     data-align={b.layout?.align}
                     data-bg={b.layout?.bg}
+                    data-type={b.type}
                   >
                     {hiddenOnThisDevice && (
                       <div className="hidden-badge">
@@ -1854,6 +2168,8 @@ export default function CampaignEditor() {
               );
             })}
 
+            {blocks.length > 0 && <CampaignFooterPreview settings={effectivePageSettings} />}
+
             <div
               className={`canvas-add-zone ${dropEndZone ? "dropping" : ""}`}
               onDragOver={onDragOverEndZone}
@@ -1864,19 +2180,17 @@ export default function CampaignEditor() {
               {dropEndZone ? "Drop to add here" : "Drag a block here, or click one on the left"}
             </div>
           </div>
-
-          <div className="text-xs muted mt-4" style={{ textAlign: "center" }}>
-            URL: <span style={{ fontFamily: "var(--ff-mono)" }}>/c/{campaign.slug}</span>
-          </div>
         </div>
 
         {/* ══ RIGHT — Properties ══ */}
         <div className="editor-col">
           <div className="editor-col-head">
-            {selected ? <span>{blockMeta(selected.type)?.name || selected.type} · Properties</span> : <span>Properties</span>}
+            {pageSelected ? <span>Page · Settings</span> : selected ? <span>{blockMeta(selected.type)?.name || selected.type} · Properties</span> : <span>Properties</span>}
           </div>
           <div className="scroll" style={{ overflow: "auto", flex: 1 }}>
-            {!selected ? (
+            {pageSelected ? (
+              <PageSettingsPanel settings={pageSettings} update={updatePageSetting} actions={actions} isTrial={isTrial} />
+            ) : !selected ? (
               <div className="empty">
                 <div className="empty-icon"><Icon name="panel-left" /></div>
                 <div className="empty-title">Nothing selected</div>
@@ -1886,6 +2200,7 @@ export default function CampaignEditor() {
               <PropertiesPanel
                 block={selected}
                 updateProp={updateProp}
+                updateProps={updateProps}
                 updateLayout={updateLayout}
                 updateVisibility={updateVisibility}
                 onDelete={() => deleteBlock(selected.id)}

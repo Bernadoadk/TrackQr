@@ -2,6 +2,7 @@ import type { ActionFunctionArgs } from "react-router";
 import { authenticate } from "../shopify.server";
 import prisma from "../db.server";
 import { getShopByDomain } from "../lib/shop.server";
+import { getBillingAccess, pauseShopPublicSurfaces } from "../lib/plan.server";
 
 interface WebhookPayload {
   app_subscription?: {
@@ -52,6 +53,13 @@ export const action = async ({ request }: ActionFunctionArgs) => {
           where: { id: shopRow.id },
           data: { activeSubscriptionId: null },
         });
+      }
+      const freshShop = await prisma.shop.findUnique({
+        where: { id: shopRow.id },
+        include: { activeSubscription: { include: { plan: true } } },
+      });
+      if (freshShop && !(await getBillingAccess(freshShop)).hasAccess) {
+        await pauseShopPublicSurfaces(shopRow.id);
       }
     }
   }

@@ -85,27 +85,45 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     const url = new URL(request.url);
     const host = (form.get("host") as string | null) || url.searchParams.get("host");
     const appUrl = process.env.SHOPIFY_APP_URL ?? url.origin;
-    const { confirmationUrl } = await startSubscription({
-      admin: admin as never as { graphql: AdminGraphqlClientArg },
-      shop,
-      plan,
-      cycle,
-      appUrl,
-      host,
-      trialDays: 0,
-    });
-    return { ok: true, intent, confirmationUrl } as const;
+    try {
+      const { confirmationUrl } = await startSubscription({
+        admin: admin as never as { graphql: AdminGraphqlClientArg },
+        shop,
+        plan,
+        cycle,
+        appUrl,
+        host,
+        trialDays: 0,
+      });
+      return { ok: true, intent, confirmationUrl } as const;
+    } catch (err) {
+      return {
+        ok: false,
+        intent,
+        error: "billing-checkout",
+        message: err instanceof Error ? err.message : "Shopify billing checkout failed.",
+      } as const;
+    }
   }
 
   if (intent === "cancel") {
     const active = shop.activeSubscription;
-    if (active) {
-      await cancelSubscription({
-        admin: admin as never as { graphql: AdminGraphqlClientArg },
-        subscription: active,
-      });
+    try {
+      if (active) {
+        await cancelSubscription({
+          admin: admin as never as { graphql: AdminGraphqlClientArg },
+          subscription: active,
+        });
+      }
+      return { ok: true, intent } as const;
+    } catch (err) {
+      return {
+        ok: false,
+        intent,
+        error: "billing-cancel",
+        message: err instanceof Error ? err.message : "Shopify billing cancellation failed.",
+      } as const;
     }
-    return { ok: true, intent } as const;
   }
 
   return { ok: false, error: "unknown-intent" } as const;
@@ -196,6 +214,16 @@ export default function PricingPage() {
     if (fetcher.state === "idle" && fetcher.data?.ok && fetcher.data.intent === "cancel") {
       setConfirmCancelOpen(false);
       toast({ title: "Subscription cancelled", desc: "Active QR codes and campaigns were paused.", type: "info" });
+    }
+  }, [fetcher.state, fetcher.data]);
+
+  useEffect(() => {
+    if (fetcher.state === "idle" && fetcher.data && !fetcher.data.ok) {
+      toast({
+        type: "error",
+        title: fetcher.data.error === "billing-checkout" ? "Shopify billing blocked" : "Billing action failed",
+        desc: "message" in fetcher.data ? fetcher.data.message : "Try again from Shopify admin.",
+      });
     }
   }, [fetcher.state, fetcher.data]);
 

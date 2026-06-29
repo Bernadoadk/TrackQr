@@ -39,7 +39,7 @@ interface AdminGraphqlClient {
   graphql: (query: string, options?: { variables?: Record<string, unknown> }) => Promise<{ json: <T>() => Promise<T> }>;
 }
 
-function isForbiddenGraphqlError(error: unknown): boolean {
+export function isForbiddenGraphqlError(error: unknown): boolean {
   if (error instanceof Response) return error.status === 403;
   if (!error || typeof error !== "object") return false;
 
@@ -54,6 +54,15 @@ function isForbiddenGraphqlError(error: unknown): boolean {
   }
 
   return typeof record.message === "string" && record.message.includes("Forbidden");
+}
+
+export function shopifyBillingForbiddenMessage() {
+  return [
+    "Shopify returned 403 Forbidden while creating the billing checkout.",
+    "This usually means the app installation/session is not allowed to create managed billing charges for this shop.",
+    "Reinstall or re-authenticate the app on this store, then verify the deployed app uses the same Shopify app client ID/secret and billing mode.",
+    "If this app is still being tested from a production deployment, set TEST_MODE=true so Shopify creates test subscriptions.",
+  ].join(" ");
 }
 
 export function isShopifyBillingTestMode() {
@@ -130,7 +139,16 @@ export async function startSubscription(opts: {
     }],
   };
 
-  const response = await opts.admin.graphql(mutation, { variables });
+  let response: Awaited<ReturnType<AdminGraphqlClient["graphql"]>>;
+  try {
+    response = await opts.admin.graphql(mutation, { variables });
+  } catch (error) {
+    if (isForbiddenGraphqlError(error)) {
+      console.warn("[billing] Shopify billing checkout failed with 403 Forbidden.");
+      throw new Error(shopifyBillingForbiddenMessage());
+    }
+    throw error;
+  }
   const json = await response.json<AppSubscriptionCreatePayload>();
   const result = json.data.appSubscriptionCreate;
   if (result.userErrors.length) {

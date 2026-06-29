@@ -14,7 +14,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const [
     { requireShop },
     { getBillingAccess },
-    { syncShopifySubscriptions },
+    { syncShopifySubscriptions, isShopifyBillingTestMode, shopifyBillingModeDescription, shopifyBillingModeLabel },
     { default: prisma },
   ] = await Promise.all([
     import("../lib/shop.server"),
@@ -60,6 +60,9 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     trialDaysLeft: access.daysLeft,
     trialEndsAt: access.trialEndsAt,
     hasActiveSubscription: access.status === "active",
+    billingMode: shopifyBillingModeLabel(),
+    billingModeDescription: shopifyBillingModeDescription(),
+    billingTestMode: isShopifyBillingTestMode(),
   };
 };
 
@@ -195,7 +198,7 @@ function featuresFor(plan: ReturnType<typeof useLoaderData<typeof loader>>["plan
 
 export default function PricingPage() {
   const toast = useToast();
-  const { plans, currentPlanId, currentCycle, accessStatus, trialDaysLeft, hasActiveSubscription } = useLoaderData<typeof loader>();
+  const { plans, currentPlanId, currentCycle, accessStatus, trialDaysLeft, hasActiveSubscription, billingMode, billingModeDescription, billingTestMode } = useLoaderData<typeof loader>();
   const fetcher = useFetcher<typeof action>();
   const [searchParams, setSearchParams] = useSearchParams();
   const [cycle, setCycle] = useState<"monthly" | "annual">("monthly");
@@ -420,6 +423,10 @@ export default function PricingPage() {
       <div className="pricing-trust">
         <div><Icon name="shield" size={14} /><span>{INSTALL_TRIAL_DAYS}-day Pro installation trial</span></div>
         <div><Icon name="credit-card" size={14} /><span>Billed through Shopify</span></div>
+        <div title={billingModeDescription}>
+          <Icon name={billingTestMode ? "settings" : "lock"} size={14} />
+          <span>Billing mode: {billingMode}</span>
+        </div>
         <div><Icon name="zap" size={14} /><span>Cancel any time</span></div>
       </div>
 

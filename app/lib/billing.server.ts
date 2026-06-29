@@ -61,20 +61,37 @@ export function shopifyBillingForbiddenMessage() {
     "Shopify returned 403 Forbidden while creating the billing checkout.",
     "This usually means the app installation/session is not allowed to create managed billing charges for this shop.",
     "Reinstall or re-authenticate the app on this store, then verify the deployed app uses the same Shopify app client ID/secret and billing mode.",
-    "If this app is still being tested from a production deployment, set TEST_MODE=true so Shopify creates test subscriptions.",
+    "If this app is still being tested from a production deployment, set TEST_MODE=true or TEST_MODE=development so Shopify creates test subscriptions.",
   ].join(" ");
 }
 
-export function isShopifyBillingTestMode() {
-  const raw = process.env.TEST_MODE?.trim().toLowerCase();
+export function getShopifyBillingMode(): "development" | "production" {
+  const raw = process.env.TEST_MODE?.trim().replace(/^['"]|['"]$/g, "").toLowerCase();
   if (raw) {
-    return ["1", "true", "yes", "test", "testing", "development", "dev"].includes(raw);
+    if (["1", "true", "yes", "on", "test", "testing", "development", "dev"].includes(raw)) {
+      return "development";
+    }
+    if (["0", "false", "no", "off", "live", "production", "prod"].includes(raw)) {
+      return "production";
+    }
+    console.warn(`[billing] Unknown TEST_MODE value "${process.env.TEST_MODE}". Falling back to NODE_ENV.`);
   }
-  return process.env.NODE_ENV !== "production";
+  return process.env.NODE_ENV !== "production" ? "development" : "production";
+}
+
+export function isShopifyBillingTestMode() {
+  return getShopifyBillingMode() === "development";
 }
 
 export function shopifyBillingModeLabel() {
-  return isShopifyBillingTestMode() ? "development" : "production";
+  return getShopifyBillingMode();
+}
+
+export function shopifyBillingModeDescription() {
+  if (isShopifyBillingTestMode()) {
+    return "Shopify test subscriptions are enabled. Merchants will see a test charge confirmation.";
+  }
+  return "Shopify live subscriptions are enabled. Merchants will create real recurring charges.";
 }
 
 /**

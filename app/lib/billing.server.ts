@@ -1,16 +1,7 @@
 import prisma from "../db.server";
 import type { Plan, Shop, Subscription } from "@prisma/client";
 import { getBillingAccess, pauseShopPublicSurfaces } from "./plan.server";
-
-interface AppSubscriptionCreatePayload {
-  data: {
-    appSubscriptionCreate: {
-      userErrors: { field: string[]; message: string }[];
-      confirmationUrl: string | null;
-      appSubscription: { id: string; status: string } | null;
-    };
-  };
-}
+import { getTrackQrBillingPlanName, parseTrackQrBillingPlanName } from "../shopify.server";
 
 interface AppSubscriptionCancelPayload {
   data: {
@@ -26,8 +17,10 @@ interface ActiveSubscriptionsPayload {
     currentAppInstallation?: {
       activeSubscriptions?: Array<{
         id: string;
+        name?: string | null;
         status: string;
         currentPeriodEnd?: string | null;
+        test?: boolean | null;
       }>;
     } | null;
   };
@@ -37,6 +30,20 @@ export type BillingCycleInput = "MONTHLY" | "ANNUAL";
 
 interface AdminGraphqlClient {
   graphql: (query: string, options?: { variables?: Record<string, unknown> }) => Promise<{ json: <T>() => Promise<T> }>;
+}
+
+interface ShopifyBillingClient {
+  request: (options: {
+    plan: string;
+    isTest?: boolean;
+    returnUrl?: string;
+    trialDays?: number;
+  }) => Promise<unknown>;
+  cancel?: (options: {
+    subscriptionId: string;
+    isTest?: boolean;
+    prorate?: boolean;
+  }) => Promise<unknown>;
 }
 
 export function isForbiddenGraphqlError(error: unknown): boolean {
@@ -94,6 +101,63 @@ export function shopifyBillingModeDescription() {
   return "Shopify live subscriptions are enabled. Merchants will create real recurring charges.";
 }
 
+function extractConfirmationUrl(response: Response): string | null {
+  return (
+    response.headers.get("Location") ||
+    response.headers.get("X-Shopify-API-Request-Failure-Reauthorize-Url") ||
+    null
+  );
+}
+
+async function extractConfirmationUrlAsync(response: Response): Promise<string | null> {
+  const fromHeaders = extractConfirmationUrl(response);
+  if (fromHeaders) return fromHeaders;
+  try {
+    const body = await response.text();
+    const match = body.match(/https:\/\/[^\s"'<>]+confirm[^\s"'<>]*/);
+    if (match) return match[0];
+  } catch {
+    /* ignore */
+  }
+  return null;
+}
+
+async function requestBillingConfirmationUrl(
+  billing: ShopifyBillingClient,
+  options: { plan: string; isTest: boolean; returnUrl: string; trialDays: number },
+): Promise<{ confirmationUrl: string; shopifyId?: string | null }> {
+  try {
+    const result = await billing.request(options);
+    if (result instanceof Response) {
+      const confirmationUrl = await extractConfirmationUrlAsync(result);
+      if (confirmationUrl) return { confirmationUrl };
+    }
+
+    if (result && typeof result === "object") {
+      const record = result as Record<string, unknown>;
+      if (typeof record.confirmationUrl === "string") {
+        const appSubscription = record.appSubscription as { id?: unknown } | undefined;
+        return {
+          confirmationUrl: record.confirmationUrl,
+          shopifyId: typeof appSubscription?.id === "string" ? appSubscription.id : null,
+        };
+      }
+    }
+  } catch (error) {
+    if (error instanceof Response) {
+      const confirmationUrl = await extractConfirmationUrlAsync(error);
+      if (confirmationUrl) return { confirmationUrl };
+    }
+    if (isForbiddenGraphqlError(error)) {
+      console.warn("[billing] Shopify billing checkout failed with 403 Forbidden.");
+      throw new Error(shopifyBillingForbiddenMessage());
+    }
+    throw error;
+  }
+
+  throw new Error("Shopify did not return a confirmation URL.");
+}
+
 /**
  * Initiate a Shopify managed subscription. Returns the merchant-facing
  * confirmation URL. The local Subscription row is created in PENDING; we
@@ -102,6 +166,7 @@ export function shopifyBillingModeDescription() {
  */
 export async function startSubscription(opts: {
   admin: AdminGraphqlClient;
+  billing?: ShopifyBillingClient;
   shop: Shop;
   plan: Plan;
   cycle: BillingCycleInput;
@@ -110,70 +175,22 @@ export async function startSubscription(opts: {
   trialDays?: number;
   test?: boolean;
 }): Promise<{ confirmationUrl: string; subscription: Subscription }> {
-  const isAnnual = opts.cycle === "ANNUAL";
-  const monthlyCents = isAnnual ? opts.plan.priceAnnual : opts.plan.priceMonthly;
-  const amount = (monthlyCents / 100).toFixed(2);
-  const interval = isAnnual ? "ANNUAL" : "EVERY_30_DAYS";
-  const name = `TrackQr ${opts.plan.name}${isAnnual ? " (annual)" : ""}`;
+  const billingPlanName = getTrackQrBillingPlanName(opts.plan.id, opts.cycle);
+  if (!billingPlanName) throw new Error(`Unknown Shopify billing plan: ${opts.plan.id}`);
+
   const returnUrl = new URL(`${opts.appUrl.replace(/\/$/, "")}/billing/return`);
   returnUrl.searchParams.set("shop", opts.shop.domain);
   if (opts.host) returnUrl.searchParams.set("host", opts.host);
   returnUrl.searchParams.set("confirmed", "1");
 
-  // Annual subscriptions use a fixed price (12× monthly equivalent).
-  const totalAmount = isAnnual ? (monthlyCents * 12 / 100).toFixed(2) : amount;
-
-  const mutation = `#graphql
-    mutation AppSubscriptionCreate($name: String!, $returnUrl: URL!, $trialDays: Int!, $test: Boolean!, $replacementBehavior: AppSubscriptionReplacementBehavior!, $lineItems: [AppSubscriptionLineItemInput!]!) {
-      appSubscriptionCreate(
-        name: $name,
-        returnUrl: $returnUrl,
-        trialDays: $trialDays,
-        test: $test,
-        replacementBehavior: $replacementBehavior,
-        lineItems: $lineItems
-      ) {
-        userErrors { field message }
-        confirmationUrl
-        appSubscription { id status }
-      }
-    }
-  `;
-
-  const variables = {
-    name,
+  if (!opts.billing) throw new Error("Shopify billing helper is unavailable for this request.");
+  const requestedTrialDays = Math.max(0, opts.trialDays ?? opts.plan.trialDays);
+  const { confirmationUrl, shopifyId } = await requestBillingConfirmationUrl(opts.billing, {
+    plan: billingPlanName,
+    isTest: opts.test ?? isShopifyBillingTestMode(),
     returnUrl: returnUrl.toString(),
-    trialDays: Math.max(0, opts.trialDays ?? opts.plan.trialDays),
-    test: opts.test ?? isShopifyBillingTestMode(),
-    replacementBehavior: "APPLY_IMMEDIATELY",
-    lineItems: [{
-      plan: {
-        appRecurringPricingDetails: {
-          price: { amount: Number(totalAmount), currencyCode: "USD" },
-          interval,
-        },
-      },
-    }],
-  };
-
-  let response: Awaited<ReturnType<AdminGraphqlClient["graphql"]>>;
-  try {
-    response = await opts.admin.graphql(mutation, { variables });
-  } catch (error) {
-    if (isForbiddenGraphqlError(error)) {
-      console.warn("[billing] Shopify billing checkout failed with 403 Forbidden.");
-      throw new Error(shopifyBillingForbiddenMessage());
-    }
-    throw error;
-  }
-  const json = await response.json<AppSubscriptionCreatePayload>();
-  const result = json.data.appSubscriptionCreate;
-  if (result.userErrors.length) {
-    throw new Error(`Shopify billing error: ${result.userErrors.map(e => e.message).join("; ")}`);
-  }
-  if (!result.confirmationUrl || !result.appSubscription) {
-    throw new Error("Shopify did not return a confirmation URL.");
-  }
+    trialDays: requestedTrialDays,
+  });
 
   const sub = await prisma.subscription.create({
     data: {
@@ -181,12 +198,12 @@ export async function startSubscription(opts: {
       planId: opts.plan.id,
       cycle: opts.cycle,
       status: "PENDING",
-      shopifyId: result.appSubscription.id,
-      trialEndsAt: (opts.trialDays ?? opts.plan.trialDays) > 0 ? new Date(Date.now() + (opts.trialDays ?? opts.plan.trialDays) * 86400000) : null,
+      shopifyId,
+      trialEndsAt: requestedTrialDays > 0 ? new Date(Date.now() + requestedTrialDays * 86400000) : null,
     },
   });
 
-  return { confirmationUrl: result.confirmationUrl, subscription: sub };
+  return { confirmationUrl, subscription: sub };
 }
 
 export async function syncShopifySubscriptions(opts: {
@@ -198,8 +215,10 @@ export async function syncShopifySubscriptions(opts: {
       currentAppInstallation {
         activeSubscriptions {
           id
+          name
           status
           currentPeriodEnd
+          test
         }
       }
     }
@@ -233,11 +252,13 @@ export async function syncShopifySubscriptions(opts: {
   const updates = localSubscriptions.map(sub => {
     const remote = activeSubscriptions.find(item => item.id === sub.shopifyId);
     if (remote?.status === "ACTIVE") {
+      const parsed = remote.name ? parseTrackQrBillingPlanName(remote.name) : null;
       return prisma.subscription.update({
         where: { id: sub.id },
         data: {
           status: "ACTIVE",
           currentPeriodEnd: remote.currentPeriodEnd ? new Date(remote.currentPeriodEnd) : sub.currentPeriodEnd,
+          ...(parsed ?? {}),
         },
       });
     }
@@ -252,8 +273,48 @@ export async function syncShopifySubscriptions(opts: {
 
   if (updates.length) await prisma.$transaction(updates);
 
+  for (const remote of activeSubscriptions.filter(sub => sub.status === "ACTIVE")) {
+    const parsed = remote.name ? parseTrackQrBillingPlanName(remote.name) : null;
+    if (!parsed) continue;
+
+    const local =
+      localSubscriptions.find(sub => sub.shopifyId === remote.id) ??
+      localSubscriptions.find(sub =>
+        !sub.shopifyId &&
+        sub.planId === parsed.planId &&
+        sub.cycle === parsed.cycle &&
+        sub.status === "PENDING",
+      );
+
+    if (local) {
+      await prisma.subscription.update({
+        where: { id: local.id },
+        data: {
+          planId: parsed.planId,
+          cycle: parsed.cycle,
+          status: "ACTIVE",
+          shopifyId: remote.id,
+          currentPeriodEnd: remote.currentPeriodEnd ? new Date(remote.currentPeriodEnd) : local.currentPeriodEnd,
+        },
+      });
+    } else {
+      await prisma.subscription.create({
+        data: {
+          shopId: opts.shopId,
+          planId: parsed.planId,
+          cycle: parsed.cycle,
+          status: "ACTIVE",
+          shopifyId: remote.id,
+          currentPeriodEnd: remote.currentPeriodEnd ? new Date(remote.currentPeriodEnd) : null,
+        },
+      });
+    }
+  }
+
   const activeLocal = await prisma.subscription.findFirst({
-    where: { shopId: opts.shopId, shopifyId: { in: [...activeIds] }, status: "ACTIVE" },
+    where: activeIds.size
+      ? { shopId: opts.shopId, shopifyId: { in: [...activeIds] }, status: "ACTIVE" }
+      : { shopId: opts.shopId, status: "ACTIVE" },
     orderBy: { createdAt: "desc" },
   });
 
@@ -264,21 +325,66 @@ export async function syncShopifySubscriptions(opts: {
 }
 
 /** Cancel an active subscription. */
-export async function cancelSubscription(opts: { admin: AdminGraphqlClient; subscription: Subscription }): Promise<void> {
-  if (!opts.subscription.shopifyId) return;
-  const mutation = `#graphql
-    mutation AppSubscriptionCancel($id: ID!) {
-      appSubscriptionCancel(id: $id) {
-        userErrors { field message }
-        appSubscription { id status }
+export async function cancelSubscription(opts: { admin: AdminGraphqlClient; billing?: ShopifyBillingClient; subscription: Subscription }): Promise<void> {
+  const activeIds = new Set<string>();
+  try {
+    const response = await opts.admin.graphql(`#graphql
+      query CurrentAppSubscriptions {
+        currentAppInstallation {
+          activeSubscriptions {
+            id
+            status
+          }
+        }
       }
+    `);
+    const json = await response.json<ActiveSubscriptionsPayload>();
+    for (const sub of json.data?.currentAppInstallation?.activeSubscriptions ?? []) {
+      if (sub.status === "ACTIVE") activeIds.add(sub.id);
     }
-  `;
-  const response = await opts.admin.graphql(mutation, { variables: { id: opts.subscription.shopifyId } });
-  const json = await response.json<AppSubscriptionCancelPayload>();
-  if (json.data.appSubscriptionCancel.userErrors.length) {
-    throw new Error(json.data.appSubscriptionCancel.userErrors.map(e => e.message).join("; "));
+  } catch (error) {
+    if (isForbiddenGraphqlError(error)) {
+      console.warn("[billing] Could not list Shopify subscriptions before cancel because Admin GraphQL returned 403 Forbidden.");
+    } else {
+      throw error;
+    }
   }
+
+  if (opts.subscription.shopifyId) activeIds.add(opts.subscription.shopifyId);
+
+  for (const id of activeIds) {
+    try {
+      if (opts.billing?.cancel) {
+        await opts.billing.cancel({
+          subscriptionId: id,
+          isTest: isShopifyBillingTestMode(),
+          prorate: true,
+        });
+        continue;
+      }
+
+      const mutation = `#graphql
+        mutation AppSubscriptionCancel($id: ID!, $prorate: Boolean) {
+          appSubscriptionCancel(id: $id, prorate: $prorate) {
+            userErrors { field message }
+            appSubscription { id status }
+          }
+        }
+      `;
+      const response = await opts.admin.graphql(mutation, { variables: { id, prorate: true } });
+      const json = await response.json<AppSubscriptionCancelPayload>();
+      if (json.data.appSubscriptionCancel.userErrors.length) {
+        throw new Error(json.data.appSubscriptionCancel.userErrors.map(e => e.message).join("; "));
+      }
+    } catch (error) {
+      if (isForbiddenGraphqlError(error)) {
+        console.warn(`[billing] Shopify cancellation skipped for ${id} because Admin GraphQL returned 403 Forbidden.`);
+        continue;
+      }
+      throw error;
+    }
+  }
+
   await prisma.subscription.update({
     where: { id: opts.subscription.id },
     data: { status: "CANCELLED", cancelledAt: new Date() },

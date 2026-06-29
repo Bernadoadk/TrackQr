@@ -39,7 +39,7 @@ export async function getShopByDomain(domain: string) {
 import { authenticate } from "../shopify.server";
 
 export async function requireShop(request: Request) {
-  const { admin, session } = await authenticate.admin(request);
+  const { admin, billing, session } = await authenticate.admin(request);
   const shop = await getOrCreateShop(session);
-  return { admin, session, shop };
+  return { admin, billing, session, shop };
 }

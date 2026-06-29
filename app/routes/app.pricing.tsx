@@ -76,7 +76,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     import("../lib/billing.server"),
     import("../db.server"),
   ]);
-  const { admin, shop } = await requireShop(request);
+  const { admin, billing, shop } = await requireShop(request);
   const form = await request.formData();
   const intent = String(form.get("intent") ?? "");
 
@@ -91,6 +91,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     try {
       const { confirmationUrl } = await startSubscription({
         admin: admin as never as { graphql: AdminGraphqlClientArg },
+        billing: billing as never as ShopifyBillingClientArg,
         shop,
         plan,
         cycle,
@@ -115,6 +116,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       if (active) {
         await cancelSubscription({
           admin: admin as never as { graphql: AdminGraphqlClientArg },
+          billing: billing as never as ShopifyBillingClientArg,
           subscription: active,
         });
       }
@@ -133,6 +135,10 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 };
 
 type AdminGraphqlClientArg = (q: string, options?: { variables?: Record<string, unknown> }) => Promise<{ json: <T>() => Promise<T> }>;
+type ShopifyBillingClientArg = {
+  request: (options: { plan: string; isTest?: boolean; returnUrl?: string; trialDays?: number }) => Promise<unknown>;
+  cancel?: (options: { subscriptionId: string; isTest?: boolean; prorate?: boolean }) => Promise<unknown>;
+};
 
 const PLAN_META: Record<string, { icon: string; accent: string; tagline: string; featured?: boolean; badge?: string }> = {
   starter: { icon: "rocket",    accent: "blue",   tagline: "Launch your first QR codes and campaign pages." },

@@ -1,5 +1,10 @@
 import type { Session } from "@shopify/shopify-app-react-router/server";
+import { Prisma } from "@prisma/client";
 import prisma from "../db.server";
+
+const shopInclude = {
+  activeSubscription: { include: { plan: true } },
+} as const;
 
 /**
  * Ensure a Shop row exists for the authenticated session.
@@ -7,27 +12,45 @@ import prisma from "../db.server";
  */
 export async function getOrCreateShop(session: Session) {
   const domain = session.shop;
-  return prisma.shop.upsert({
-    where: { domain },
-    update: {
-      uninstalledAt: null, // re-install resets uninstalled flag
-    },
-    create: {
-      domain,
-      name: domain.replace(".myshopify.com", ""),
-      email: (session as { email?: string }).email ?? null,
-    },
-    include: {
-      activeSubscription: { include: { plan: true } },
-    },
-  });
+  const email = (session as { email?: string }).email ?? null;
+  const data = {
+    uninstalledAt: null,
+    ...(email ? { email } : {}),
+  };
+
+  try {
+    return await prisma.shop.upsert({
+      where: { domain },
+      update: data,
+      create: {
+        domain,
+        name: domain.replace(".myshopify.com", ""),
+        email,
+      },
+      include: shopInclude,
+    });
+  } catch (error) {
+    if (
+      error instanceof Prisma.PrismaClientKnownRequestError &&
+      error.code === "P2002" &&
+      Array.isArray(error.meta?.target) &&
+      error.meta.target.includes("domain")
+    ) {
+      return prisma.shop.update({
+        where: { domain },
+        data,
+        include: shopInclude,
+      });
+    }
+    throw error;
+  }
 }
 
 /** Lookup by domain only (read-only, used by webhooks). */
 export async function getShopByDomain(domain: string) {
   return prisma.shop.findUnique({
     where: { domain },
-    include: { activeSubscription: { include: { plan: true } } },
+    include: shopInclude,
   });
 }
 

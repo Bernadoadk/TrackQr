@@ -603,6 +603,12 @@ a { color: inherit; text-decoration: none; }
   border-color: var(--border-strong);
 }
 .btn-outline:hover { background: var(--bg-hover); }
+.btn:disabled {
+  opacity: 0.58;
+  cursor: not-allowed;
+  transform: none;
+  box-shadow: none;
+}
 
 /* ── Card ── */
 .card {
@@ -617,6 +623,81 @@ a { color: inherit; text-decoration: none; }
   transform: translateY(-2px);
   box-shadow: var(--sh-md);
   border-color: var(--border-strong);
+}
+
+/* ── Reviews & support ── */
+.review-prompt {
+  display: flex;
+  gap: 10px;
+  padding: 12px;
+  background: var(--accent-softer);
+  border: 1px solid var(--accent-border);
+  border-radius: var(--r-md);
+}
+.review-prompt-icon,
+.help-card-icon {
+  width: 30px;
+  height: 30px;
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+  color: var(--accent);
+  background: var(--accent-soft);
+  border: 1px solid var(--accent-border);
+  border-radius: var(--r-md);
+}
+.help-card-icon.amber {
+  color: var(--amber);
+  background: var(--amber-soft);
+  border-color: var(--amber-border);
+}
+.review-prompt-body {
+  min-width: 0;
+}
+.review-prompt-title,
+.help-card-title {
+  color: var(--fg-strong);
+  font-weight: 650;
+  font-size: 13px;
+}
+.review-prompt p {
+  margin: 4px 0 0;
+  color: var(--fg-muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+.review-prompt-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+.faq-row {
+  display: block;
+  width: 100%;
+  padding: 14px 18px;
+  border: 0;
+  border-bottom: 1px solid var(--border-soft);
+  background: transparent;
+  color: inherit;
+  cursor: default;
+  font: inherit;
+}
+.faq-row:hover {
+  background: var(--bg-hover);
+}
+.faq-row:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+.help-contact-card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+}
+.help-contact-card .help-card-title {
+  margin-top: 12px;
+  margin-bottom: 6px;
 }
 .card-pad { padding: 20px; }
 .card-pad-lg { padding: 24px; }

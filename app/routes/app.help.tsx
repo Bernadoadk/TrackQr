@@ -1,15 +1,16 @@
 import type { HeadersFunction, LoaderFunctionArgs } from "react-router";
+import { useLoaderData } from "react-router";
 import { useState } from "react";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
 import { Icon } from "../components/ui/Icon";
-import { Button } from "../components/ui/Button";
-import { Badge } from "../components/ui/Badge";
 import { Card, CardHead } from "../components/ui/Card";
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   await authenticate.admin(request);
-  return null;
+  return {
+    supportEmail: process.env.SUPPORT_EMAIL?.trim() || process.env.SMTP_FROM_EMAIL?.trim() || "adikpetobernado@gmail.com",
+  };
 };
 
 const FAQS = [
@@ -18,10 +19,13 @@ const FAQS = [
   { id: "c", q: "Can I add my logo to the center?", a: "Yes — under Design → Center logo. We auto-add error-correction so scanning stays reliable." },
   { id: "d", q: "How are conversions attributed?", a: "We attribute conversions to a scan when the visitor reaches the Shopify thank-you page within 7 days from the same device." },
   { id: "e", q: "Where are leads from a campaign stored?", a: "Campaign leads are saved in TrackQr, exportable as CSV, and the merchant receives each submission by SMTP when the block has a recipient email." },
+  { id: "f", q: "Where can I leave feedback about TrackQr?", a: "You can contact support for help or share your experience on the Shopify App Store after you have used the app." },
 ];
 
 export default function Help() {
+  const { supportEmail } = useLoaderData<typeof loader>();
   const [open, setOpen] = useState<string | null>("a");
+  const supportHref = `mailto:${supportEmail}?subject=${encodeURIComponent("TrackQr support request")}`;
 
   return (
     <>
@@ -29,11 +33,13 @@ export default function Help() {
         <div className="page-head-left">
           <div className="page-eyebrow"><Icon name="help-circle" size={11} /> Help center</div>
           <h1 className="page-h1"><span className="em">How</span> can we help?</h1>
-          <div className="page-sub">Most questions answered in a sentence. Anything else, chat us — we reply in minutes.</div>
+          <div className="page-sub">Find quick answers, contact support, or share feedback after using TrackQr.</div>
         </div>
         <div className="page-head-actions">
-          <Button variant="secondary" icon="external-link">Documentation</Button>
-          <Button variant="primary" icon="message-square">Chat with us</Button>
+          <a className="btn btn-primary" href={supportHref}>
+            <Icon name="message-square" />
+            Contact support
+          </a>
         </div>
       </div>
 
@@ -58,28 +64,50 @@ export default function Help() {
         ))}
       </div>
 
-      <Card>
-        <CardHead title="Frequently asked" />
-        {FAQS.map(f => (
-          <div
-            key={f.id}
-            style={{
-              borderBottom: "1px solid var(--border-soft)",
-              padding: "14px 18px",
-              cursor: "default",
-            }}
-            onClick={() => setOpen(open === f.id ? null : f.id)}
-          >
-            <div className="flex items-center justify-between">
-              <div style={{ fontSize: 13.5, fontWeight: 500, color: "var(--fg-strong)" }}>{f.q}</div>
-              <Icon name={open === f.id ? "chevron-up" : "chevron-down"} size={14} style={{ color: "var(--fg-subtle)", flexShrink: 0, marginLeft: 12 }} />
+      <div className="grid grid-23">
+        <Card>
+          <CardHead title="Frequently asked" />
+          {FAQS.map(f => (
+            <button
+              key={f.id}
+              type="button"
+              className="faq-row"
+              aria-expanded={open === f.id}
+              onClick={() => setOpen(open === f.id ? null : f.id)}
+            >
+              <div className="flex items-center justify-between">
+                <div style={{ fontSize: 13.5, fontWeight: 500, color: "var(--fg-strong)", textAlign: "left" }}>{f.q}</div>
+                <Icon name={open === f.id ? "chevron-up" : "chevron-down"} size={14} style={{ color: "var(--fg-subtle)", flexShrink: 0, marginLeft: 12 }} />
+              </div>
+              {open === f.id && (
+                <div className="text-sm muted mt-2" style={{ maxWidth: 720, textAlign: "left" }}>{f.a}</div>
+              )}
+            </button>
+          ))}
+        </Card>
+
+        <div className="col gap-4">
+          <Card className="card-pad help-contact-card" accent="blue">
+            <div className="help-card-icon"><Icon name="message-square" size={18} /></div>
+            <div className="help-card-title">Need help before leaving a review?</div>
+            <div className="text-sm muted">
+              Send the issue, your shop domain, and what you were trying to do. We will help you get unstuck.
             </div>
-            {open === f.id && (
-              <div className="text-sm muted mt-2" style={{ maxWidth: 720 }}>{f.a}</div>
-            )}
-          </div>
-        ))}
-      </Card>
+            <a className="btn btn-primary mt-4" href={supportHref}>
+              <Icon name="send" />
+              Email support
+            </a>
+          </Card>
+
+          <Card className="card-pad help-contact-card" accent="amber">
+            <div className="help-card-icon amber"><Icon name="star" size={18} /></div>
+            <div className="help-card-title">Reviews are requested natively</div>
+            <div className="text-sm muted">
+              After successful workflows, Shopify can show its native review prompt when the shop is eligible.
+            </div>
+          </Card>
+        </div>
+      </div>
     </>
   );
 }

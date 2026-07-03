@@ -18,6 +18,7 @@ import { Card } from "../components/ui/Card";
 import { Field, Input, Textarea } from "../components/ui/Input";
 import { Segmented } from "../components/ui/Segmented";
 import { useToast } from "../components/ui/Toast";
+import { ReviewPrompt } from "../components/ReviewPrompt";
 import { renderQrSvg as renderQrSvgClient, renderFrameSvg, framesForPosition, frameInvertsLabel, FRAME_LABEL, FRAMES_WITH_LABEL_ZONE, type FrameStyle, type QrLabelOpts } from "../lib/qr-render";
 import { LogoPicker, logoSvgDataUrl, type LogoSelection } from "../components/ui/LogoPicker";
 import { LABEL_FONTS, LABEL_FONT_GROUPS, DEFAULT_FONT, getLabelFont } from "../lib/label-fonts";
@@ -1944,6 +1945,8 @@ export default function CreateQr() {
               <div className="text-xs muted" style={{ textAlign: "center" }}>
                 {!savedQr ? "Save first to unlock activation and downloads." : activated ? "Changes can still be saved while this QR stays active." : "Saved drafts can be activated here or from My QR codes."}
               </div>
+
+              {activated && savedQr && <ReviewPrompt />}
 
               <div className="strong mt-2" style={{ fontSize: 12 }}>Scan URL</div>
               <div style={{ fontFamily: "var(--ff-mono)", fontSize: 11, padding: "8px 10px", background: "var(--bg-sunken)", border: "1px solid var(--border)", borderRadius: 6, display: "flex", alignItems: "center", gap: 8 }}>

@@ -1,6 +1,6 @@
 import prisma from "../db.server";
 import type { Plan, Shop, Subscription } from "@prisma/client";
-import { getBillingAccess, pauseShopPublicSurfaces } from "./plan.server";
+import { enforcePlanQuotas } from "./plan.server";
 import { getTrackQrBillingPlanName, parseTrackQrBillingPlanName } from "../shopify.server";
 
 interface AppSubscriptionCancelPayload {
@@ -262,7 +262,10 @@ export async function syncShopifySubscriptions(opts: {
         },
       });
     }
-    if (sub.status === "ACTIVE" && sub.shopifyId && !activeIds.has(sub.shopifyId)) {
+    // Shopify is the source of truth: a local row still marked ACTIVE that
+    // Shopify no longer reports as active (cancelled, expired, or never
+    // confirmed) must not keep the store on a paid plan.
+    if (sub.status === "ACTIVE" && (!sub.shopifyId || !activeIds.has(sub.shopifyId))) {
       return prisma.subscription.update({
         where: { id: sub.id },
         data: { status: "PENDING" },
@@ -311,12 +314,12 @@ export async function syncShopifySubscriptions(opts: {
     }
   }
 
-  const activeLocal = await prisma.subscription.findFirst({
-    where: activeIds.size
-      ? { shopId: opts.shopId, shopifyId: { in: [...activeIds] }, status: "ACTIVE" }
-      : { shopId: opts.shopId, status: "ACTIVE" },
-    orderBy: { createdAt: "desc" },
-  });
+  const activeLocal = activeIds.size
+    ? await prisma.subscription.findFirst({
+        where: { shopId: opts.shopId, shopifyId: { in: [...activeIds] }, status: "ACTIVE" },
+        orderBy: { createdAt: "desc" },
+      })
+    : null;
 
   await prisma.shop.update({
     where: { id: opts.shopId },
@@ -352,6 +355,7 @@ export async function cancelSubscription(opts: { admin: AdminGraphqlClient; bill
 
   if (opts.subscription.shopifyId) activeIds.add(opts.subscription.shopifyId);
 
+  const refused: string[] = [];
   for (const id of activeIds) {
     try {
       if (opts.billing?.cancel) {
@@ -378,11 +382,21 @@ export async function cancelSubscription(opts: { admin: AdminGraphqlClient; bill
       }
     } catch (error) {
       if (isForbiddenGraphqlError(error)) {
-        console.warn(`[billing] Shopify cancellation skipped for ${id} because Admin GraphQL returned 403 Forbidden.`);
+        console.warn(`[billing] Shopify refused to cancel ${id} (403 Forbidden).`);
+        refused.push(id);
         continue;
       }
       throw error;
     }
+  }
+
+  // Never mark a subscription cancelled locally while Shopify still bills it:
+  // the next sync would resurrect it and the UI would flip back to the paid
+  // plan right after a "cancelled" confirmation.
+  if (refused.length) {
+    throw new Error(
+      "Shopify refused to cancel the subscription (403 Forbidden). Cancel it from Shopify admin → Settings → Apps and sales channels → TrackQr, then reload this page.",
+    );
   }
 
   await prisma.subscription.update({
@@ -393,13 +407,12 @@ export async function cancelSubscription(opts: { admin: AdminGraphqlClient; bill
     where: { id: opts.subscription.shopId },
     data: { activeSubscriptionId: null },
   });
+  // The store now falls back to Free: pause whatever sits beyond its quotas.
   const shop = await prisma.shop.findUnique({
     where: { id: opts.subscription.shopId },
     include: { activeSubscription: { include: { plan: true } } },
   });
-  if (shop && !(await getBillingAccess(shop)).hasAccess) {
-    await pauseShopPublicSurfaces(opts.subscription.shopId);
-  }
+  if (shop) await enforcePlanQuotas(shop);
 }
 
 /**

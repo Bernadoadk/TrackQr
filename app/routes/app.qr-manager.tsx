@@ -1,10 +1,11 @@
 import type { HeadersFunction, LoaderFunctionArgs, ActionFunctionArgs } from "react-router";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useLoaderData, useFetcher, useNavigate, Link, useSearchParams } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { requireShop } from "../lib/shop.server";
 import { listQrCodes, setActive, deleteQr, duplicateQr, archiveQr } from "../lib/qr-crud.server";
-import { getPlanEntitlements, QuotaExceededError } from "../lib/plan.server";
+import { getPlanEntitlements, getQuotaState, QuotaExceededError } from "../lib/plan.server";
+import { featureMinPlanLabel } from "../lib/plan.constants";
 import { QR_TYPE_FROM_UI, QR_TYPE_TO_UI } from "../lib/qr-types";
 import { Icon } from "../components/ui/Icon";
 import { Button } from "../components/ui/Button";
@@ -55,13 +56,18 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 
   // Surface the public scan URL origin so the client can copy it without window hacks.
   const origin = (process.env.SHOPIFY_APP_URL ?? url.origin).replace(/\/$/, "");
+  const quota = await getQuotaState(shop.id, "qrCodes", entitlements.qrCodeLimit);
 
   return {
     items,
     origin,
     shopDomain: shop.domain,
     canAttribution: entitlements.attribution,
+    canExport: entitlements.exports,
     historyDays: entitlements.historyDays,
+    planName: entitlements.planName,
+    qrLimit: entitlements.qrCodeLimit,
+    overQuotaIds: quota.overQuotaIds,
   };
 };
 
@@ -76,7 +82,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     switch (intent) {
       case "toggle": {
         const active = form.get("active") === "1";
-        await setActive(shop.id, id, active);
+        await setActive(shop, id, active);
         return { ok: true, intent, id } as const;
       }
       case "delete": {
@@ -154,9 +160,22 @@ function embeddedResourceHref(path: string, searchParams: URLSearchParams, fallb
 export default function QrManager() {
   const navigate = useNavigate();
   const toast    = useToast();
-  const { items, origin, shopDomain, canAttribution, historyDays } = useLoaderData<typeof loader>();
+  const { items, origin, shopDomain, canAttribution, canExport, historyDays, planName, qrLimit, overQuotaIds } = useLoaderData<typeof loader>();
   const fetcher  = useFetcher<typeof action>();
   const [searchParams] = useSearchParams();
+  const overQuota = useMemo(() => new Set(overQuotaIds), [overQuotaIds]);
+  const exportPlan = featureMinPlanLabel("exports");
+
+  // Surface server-side failures (plan quota, errors) as toasts.
+  useEffect(() => {
+    if (fetcher.state !== "idle" || !fetcher.data || fetcher.data.ok) return;
+    const data = fetcher.data;
+    toast({
+      type: "error",
+      title: data.error === "quota" ? "Plan limit reached" : "Action failed",
+      desc: "message" in data ? data.message : "Try again.",
+    });
+  }, [fetcher.state, fetcher.data]);
 
   const [query,        setQuery]        = useState(searchParams.get("q") ?? "");
   const [typeFilter,   setTypeFilter]   = useState(coerceUiTypeFilter(searchParams.get("type")));
@@ -223,6 +242,10 @@ export default function QrManager() {
   };
 
   const exportCodes = async () => {
+    if (!canExport) {
+      toast({ type: "info", title: "CSV export is locked", desc: `Upgrade to ${exportPlan} to export your QR codes.` });
+      return;
+    }
     setExporting(true);
     try {
       await downloadFile(exportHref, "trackqr-codes.csv");
@@ -233,6 +256,8 @@ export default function QrManager() {
       setExporting(false);
     }
   };
+
+  const downloadFormats: DownloadFormat[] = canExport ? ["png", "svg", "pdf"] : ["png"];
 
   return (
     <>
@@ -255,12 +280,18 @@ export default function QrManager() {
       {/* Header */}
       <div className="page-head">
         <div className="page-head-left">
-          <div className="page-eyebrow"><Icon name="qr-code" size={11} /> {items.length} codes</div>
+          <div className="page-eyebrow"><Icon name="qr-code" size={11} /> {items.length}{qrLimit != null ? ` / ${qrLimit}` : ""} codes · {planName} plan</div>
           <h1 className="page-h1">My <span className="em">QR codes</span></h1>
           <div className="page-sub">Browse, edit and download every code your team has shipped. Scan stats show {historyDays ? `the last ${historyDays} days` : "full history"}.</div>
         </div>
         <div className="page-head-actions">
-          <Button variant="secondary" icon="download" onClick={exportCodes} disabled={exporting}>
+          <Button
+            variant="secondary"
+            icon={canExport ? "download" : "lock"}
+            onClick={exportCodes}
+            disabled={exporting}
+            title={canExport ? "Export the list as CSV" : `CSV export requires the ${exportPlan} plan`}
+          >
             {exporting ? "Exporting..." : "Export CSV"}
           </Button>
           <Button variant="primary" icon="plus" onClick={() => navigate("/app/create")}>New QR code</Button>
@@ -272,7 +303,7 @@ export default function QrManager() {
         <StatCard accent="blue"   label="Total QR codes" value={items.length}         icon="qr-code"      sub={`${activeCount} active`} />
         <StatCard accent="violet" label="Total scans"    value={fmt(totalScans)}      icon="scan" />
         <StatCard accent="green"  label="Active rate"    value={fmtPct(activePct, 0)} icon="circle-check" sub={`${activeCount} / ${items.length}`} />
-        <StatCard accent="amber"  label={canAttribution ? "Conversions" : "Conversions locked"} value={canAttribution ? fmt(totalConv) : "Growth"} icon="zap" />
+        <StatCard accent="amber"  label="Conversions" value={canAttribution ? fmt(totalConv) : "Locked"} icon={canAttribution ? "zap" : "lock"} sub={canAttribution ? undefined : "Growth plan"} />
       </div>
 
       {/* ── Filterbar ── */}
@@ -364,6 +395,7 @@ export default function QrManager() {
           {sorted.map(qr => {
             const tm = typeMeta(QR_TYPE_TO_UI[qr.type] ?? "link");
             const scanLink = `${origin}/s/${qr.slug}`;
+            const isOverQuota = overQuota.has(qr.id);
             return (
               <Card key={qr.id} hoverLift className="card-pad">
                 <div className="flex items-center gap-3 mb-3" style={{ justifyContent: "space-between" }}>
@@ -371,9 +403,13 @@ export default function QrManager() {
                     <Icon name={tm.icon} size={11} />
                     {tm.name}
                   </Badge>
-                  <Badge tone={qr.active ? "success" : "neutral"} dot>
-                    {qr.active ? "Active" : "Paused"}
-                  </Badge>
+                  {isOverQuota ? (
+                    <Badge tone="warning" dot>Over plan limit</Badge>
+                  ) : (
+                    <Badge tone={qr.active ? "success" : "neutral"} dot>
+                      {qr.active ? "Active" : "Paused"}
+                    </Badge>
+                  )}
                 </div>
 
                 <div style={{
@@ -429,9 +465,10 @@ export default function QrManager() {
                       <Icon name="copy" size={13} />
                     </Button>
                     <Button size="sm" variant="ghost"
-                      title={qr.active ? "Deactivate QR code" : "Activate QR code"}
+                      title={isOverQuota ? `Beyond your ${planName} plan limit — archive older codes or upgrade to reactivate` : qr.active ? "Deactivate QR code" : "Activate QR code"}
+                      disabled={isOverQuota && !qr.active}
                       onClick={() => submitIntent("toggle", qr.id, { active: qr.active ? "0" : "1" })}>
-                      <Icon name={qr.active ? "pause" : "play"} size={13} />
+                      <Icon name={qr.active ? "pause" : isOverQuota ? "lock" : "play"} size={13} />
                     </Button>
                     <Button size="sm" variant="ghost"
                       title="Duplicate QR code"
@@ -466,7 +503,7 @@ export default function QrManager() {
                         boxShadow: "0 18px 40px rgba(15, 23, 42, .18)",
                         zIndex: 20,
                       }}>
-                        {(["png", "svg", "pdf"] as DownloadFormat[]).map(format => (
+                        {downloadFormats.map(format => (
                           <button
                             key={format}
                             type="button"
@@ -491,6 +528,11 @@ export default function QrManager() {
                             {format.toUpperCase()}
                           </button>
                         ))}
+                        {!canExport && (
+                          <div style={{ padding: "6px 10px 4px", fontSize: 10.5, color: "var(--fg-subtle)", whiteSpace: "nowrap", display: "flex", alignItems: "center", gap: 5 }}>
+                            <Icon name="lock" size={10} /> SVG · PDF on {exportPlan}
+                          </div>
+                        )}
                       </div>
                     </details>
                     <Button size="sm" variant="ghost"

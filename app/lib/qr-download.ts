@@ -100,7 +100,10 @@ function concatBytes(...chunks: Uint8Array[]) {
 }
 
 export async function downloadQrAsset(qr: { id: string; name: string; slug: string }, format: DownloadFormat) {
-  const res = await fetch(`/qr/${qr.id}/svg?size=1024`);
+  // SVG and PDF are plan-gated exports (`download=1` lets the server enforce
+  // it); the inline SVG rasterized into a PNG is available on every plan.
+  const res = await fetch(`/qr/${qr.id}/svg?size=1024${format === "png" ? "" : "&download=1"}`);
+  if (res.status === 402) throw new Error("SVG and PDF downloads require the Starter plan.");
   if (!res.ok) throw new Error("Could not prepare QR code");
   const svg = await res.text();
   const filename = safeFilename(qr.name, qr.slug);

@@ -2,8 +2,9 @@ import prisma from "../db.server";
 import type { QrType, QrCode } from "@prisma/client";
 import { z } from "zod";
 import { shortSlug } from "./slug.server";
-import { assertQuota, type ShopWithPlan } from "./plan.server";
+import { assertQuota, assertWithinQuota, resolvePlan, type ShopWithPlan } from "./plan.server";
 import { parseQrType } from "./qr-types";
+import { standardDesign, standardizeLabel } from "./qr-standard";
 import { type QrDesign, type QrLabel, DEFAULT_DESIGN, DEFAULT_LABEL } from "./qr.server";
 
 export const CreateQrSchema = z.object({
@@ -84,11 +85,26 @@ async function prepareCampaignLink(shopId: string, campaignId: string | null | u
   });
 }
 
+/**
+ * Design + label actually persisted for a plan. Plans without `customDesign`
+ * (Free) always store the standard look — the label keeps its text/position.
+ */
+async function appearanceForPlan(shop: ShopWithPlan, design: object, label: object) {
+  const plan = await resolvePlan(shop);
+  if (plan.customDesign) return { design, label, customDesign: true };
+  return { design: standardDesign(), label: standardizeLabel(label), customDesign: false };
+}
+
 export async function createQr(shop: ShopWithPlan, input: CreateQrInput): Promise<QrCode> {
   await assertQuota(shop, "qrCodes");
   const parsed = CreateQrSchema.parse(input);
   const type: QrType = parseQrType(parsed.type);
   await prepareCampaignLink(shop.id, parsed.campaignId);
+  const appearance = await appearanceForPlan(
+    shop,
+    { ...DEFAULT_DESIGN, ...parsed.design },
+    { ...DEFAULT_LABEL, ...parsed.label },
+  );
 
   // Generate a unique slug — retry up to 5 times on collision (statistically: never).
   for (let i = 0; i < 5; i++) {
@@ -103,8 +119,8 @@ export async function createQr(shop: ShopWithPlan, input: CreateQrInput): Promis
           type,
           target: parsed.target ?? "",
           shopifyRef: parsed.shopifyRef ?? null,
-          design: { ...DEFAULT_DESIGN, ...parsed.design },
-          label: { ...DEFAULT_LABEL, ...parsed.label },
+          design: appearance.design,
+          label: appearance.label,
           utmCampaign: parsed.utmCampaign ?? null,
           utmSource:   parsed.utmSource   ?? null,
           utmMedium:   parsed.utmMedium   ?? null,
@@ -128,9 +144,11 @@ export const UpdateQrSchema = CreateQrSchema.partial().extend({
   id: z.string(),
 });
 
-export async function updateQr(shopId: string, id: string, input: Partial<CreateQrInput>) {
+export async function updateQr(shop: ShopWithPlan, id: string, input: Partial<CreateQrInput>) {
+  const shopId = shop.id;
   const qr = await prisma.qrCode.findFirst({ where: { id, shopId } });
   if (!qr) throw new Error("QR code not found");
+  const plan = await resolvePlan(shop);
 
   const next: Record<string, unknown> = {};
   if (input.name !== undefined)        next.name        = input.name;
@@ -142,22 +160,37 @@ export async function updateQr(shopId: string, id: string, input: Partial<Create
   if (input.utmMedium !== undefined)   next.utmMedium   = input.utmMedium;
   if (input.utmTerm !== undefined)     next.utmTerm     = input.utmTerm;
   if (input.type !== undefined)        next.type        = parseQrType(input.type);
-  if (input.design !== undefined)      next.design      = { ...(qr.design as object), ...input.design };
-  if (input.label !== undefined)       next.label       = { ...(qr.label as object), ...input.label };
+  if (plan.customDesign) {
+    if (input.design !== undefined)    next.design      = { ...(qr.design as object), ...input.design };
+    if (input.label !== undefined)     next.label       = { ...(qr.label as object), ...input.label };
+  } else if (input.label !== undefined) {
+    // Without `customDesign` the stored design is left untouched (it comes
+    // back after an upgrade); only the label text / position can change.
+    const stored = qr.label as Record<string, unknown>;
+    next.label = {
+      ...stored,
+      ...(input.label.text !== undefined ? { text: input.label.text } : {}),
+      ...(input.label.position !== undefined ? { position: input.label.position } : {}),
+    };
+  }
   if (input.activatesAt !== undefined) next.activatesAt = input.activatesAt ? new Date(input.activatesAt) : null;
   if (input.expiresAt !== undefined)   next.expiresAt   = input.expiresAt   ? new Date(input.expiresAt)   : null;
   if (input.campaignId !== undefined) {
     await prepareCampaignLink(shopId, input.campaignId, id);
     next.campaignId = input.campaignId || null;
   }
-  if (input.activate !== undefined)    next.active      = !!input.activate;
+  if (input.activate !== undefined) {
+    if (input.activate && !qr.active) await assertWithinQuota(shop, "qrCodes", qr);
+    next.active = !!input.activate;
+  }
 
   return prisma.qrCode.update({ where: { id }, data: next });
 }
 
-export async function setActive(shopId: string, id: string, active: boolean) {
-  const qr = await prisma.qrCode.findFirst({ where: { id, shopId } });
+export async function setActive(shop: ShopWithPlan, id: string, active: boolean) {
+  const qr = await prisma.qrCode.findFirst({ where: { id, shopId: shop.id } });
   if (!qr) throw new Error("QR code not found");
+  if (active) await assertWithinQuota(shop, "qrCodes", qr);
   await prisma.qrCode.update({ where: { id }, data: { active } });
 }
 
@@ -196,6 +229,7 @@ export async function duplicateQr(shop: ShopWithPlan, id: string) {
   await assertQuota(shop, "qrCodes");
   const source = await prisma.qrCode.findFirst({ where: { id, shopId: shop.id } });
   if (!source) throw new Error("QR code not found");
+  const appearance = await appearanceForPlan(shop, source.design as object, source.label as object);
   for (let i = 0; i < 5; i++) {
     const slug = shortSlug(7);
     try {
@@ -208,8 +242,8 @@ export async function duplicateQr(shop: ShopWithPlan, id: string) {
           type: source.type,
           target: source.target,
           shopifyRef: source.shopifyRef,
-          design: source.design as object,
-          label: source.label as object,
+          design: appearance.design,
+          label: appearance.label,
           utmCampaign: source.utmCampaign,
           utmSource: source.utmSource,
           utmMedium: source.utmMedium,

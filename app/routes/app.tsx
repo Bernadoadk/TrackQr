@@ -1,5 +1,4 @@
 import type { HeadersFunction, LoaderFunctionArgs } from "react-router";
-import { redirect } from "react-router";
 import { useRouteError } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { AppProvider } from "@shopify/shopify-app-react-router/react";
@@ -7,7 +6,7 @@ import { useLoaderData } from "react-router";
 import { AppShell } from "../components/layout/AppShell";
 import { RouteError } from "../components/RouteError";
 import { requireShop } from "../lib/shop.server";
-import { getBillingAccess, getPlanUsage, pauseShopPublicSurfaces } from "../lib/plan.server";
+import { enforcePlanQuotas, getPlanUsage } from "../lib/plan.server";
 import { syncShopifySubscriptions } from "../lib/billing.server";
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
@@ -23,21 +22,10 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     }),
   );
   const effectiveShop = freshShop ?? shop;
-  const access = await getBillingAccess(effectiveShop);
-  if (!access.hasAccess) {
-    await pauseShopPublicSurfaces(effectiveShop.id);
-    const url = new URL(request.url);
-    const path = url.pathname;
-    if (path !== "/app/pricing") {
-      const next = new URLSearchParams({ billing: "required" });
-      const shopParam = url.searchParams.get("shop");
-      const hostParam = url.searchParams.get("host");
-      if (shopParam) next.set("shop", shopParam);
-      if (hostParam) next.set("host", hostParam);
-      throw redirect(`/app/pricing?${next.toString()}`);
-    }
-  }
-  const usage = await getPlanUsage(effectiveShop);
+  // The app is never blocked: without a subscription the store is on the
+  // Free plan. Items beyond the plan quotas are paused here.
+  const quotas = await enforcePlanQuotas(effectiveShop);
+  const usage = await getPlanUsage(effectiveShop, quotas);
   return {
     apiKey: process.env.SHOPIFY_API_KEY || "",
     shop: {

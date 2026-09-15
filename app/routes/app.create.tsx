@@ -9,16 +9,19 @@ import { createQr, getQrForEdit, updateQr } from "../lib/qr-crud.server";
 import { listTemplates, createTemplate, deleteTemplate } from "../lib/templates.server";
 import { listCampaigns } from "../lib/campaign.server";
 import { createDiscountCode } from "../lib/discounts.server";
-import { QuotaExceededError } from "../lib/plan.server";
+import { FeatureLockedError, getPlanEntitlements, QuotaExceededError, requireFeature } from "../lib/plan.server";
+import { featureMinPlanLabel } from "../lib/plan.constants";
+import { STANDARD_DESIGN, STANDARD_LABEL_FORMAT } from "../lib/qr-standard";
 import { QR_TYPE_TO_UI } from "../lib/qr-types";
 import { Icon } from "../components/ui/Icon";
 import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
 import { Card } from "../components/ui/Card";
+import { FeatureLock } from "../components/ui/FeatureLock";
 import { Field, Input, Textarea } from "../components/ui/Input";
 import { Segmented } from "../components/ui/Segmented";
 import { useToast } from "../components/ui/Toast";
-import { ReviewPrompt } from "../components/ReviewPrompt";
+import { useReviewRequest } from "../lib/use-review-request";
 import { renderQrSvg as renderQrSvgClient, renderFrameSvg, framesForPosition, frameInvertsLabel, FRAME_LABEL, FRAMES_WITH_LABEL_ZONE, type FrameStyle, type QrLabelOpts } from "../lib/qr-render";
 import { LogoPicker, logoSvgDataUrl, type LogoSelection } from "../components/ui/LogoPicker";
 import { LABEL_FONTS, LABEL_FONT_GROUPS, DEFAULT_FONT, getLabelFont } from "../lib/label-fonts";
@@ -32,12 +35,18 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const editId = url.searchParams.get("edit");
   const origin = (process.env.SHOPIFY_APP_URL ?? url.origin).replace(/\/$/, "");
   // Load templates + active campaigns once for the page (cheap queries).
-  const [templates, campaigns, editQr] = await Promise.all([
+  const [templates, campaigns, editQr, entitlements] = await Promise.all([
     listTemplates(shop.id),
     listCampaigns(shop.id),
     editId ? getQrForEdit(shop.id, editId) : Promise.resolve(null),
+    getPlanEntitlements(shop),
   ]);
   return {
+    plan: {
+      name: entitlements.planName,
+      customDesign: entitlements.customDesign,
+      exports: entitlements.exports,
+    },
     templates: templates.map(t => ({
       id: t.id,
       name: t.name,
@@ -80,6 +89,8 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   // ── Template intents ─────────────────────────────────
   if (intent === "template:save") {
     try {
+      // Saved design presets belong to the custom-design feature (Starter+).
+      await requireFeature(shop, "customDesign", featureMinPlanLabel("customDesign"));
       const t = await createTemplate(shop.id, {
         name:   String(form.get("name") ?? "Untitled template"),
         design: JSON.parse(String(form.get("design") ?? "{}")),
@@ -136,7 +147,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
     const editId = String(form.get("id") ?? "");
     const qr = intent === "update" && editId
-      ? await updateQr(shop.id, editId, payload)
+      ? await updateQr(shop, editId, payload)
       : await createQr(shop, payload);
 
     return {
@@ -154,8 +165,11 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         ok: false,
         intent: "create" as const,
         error: "quota",
-        message: `Plan limit reached — ${err.resource} (${err.limit} max on ${err.planId}). Upgrade to add more.`,
+        message: err.message,
       } as const;
+    }
+    if (err instanceof FeatureLockedError) {
+      return { ok: false, intent: "create" as const, error: "locked", message: err.message } as const;
     }
     const message = err instanceof Error ? err.message : "Could not save QR code";
     return { ok: false, intent: "create" as const, error: "validation", message } as const;
@@ -456,9 +470,16 @@ export default function CreateQr() {
   const fetcher  = useFetcher<typeof action>();
   const templateFetcher = useFetcher<typeof action>();
   const shopify  = useAppBridge();
+  const requestReview = useReviewRequest();
   // Loader data — saved templates + active campaigns to attach to.
-  const { templates, campaigns, editQr, origin } = useLoaderData<typeof loader>();
+  const { templates, campaigns, editQr, origin, plan } = useLoaderData<typeof loader>();
   const isEditing = !!editQr;
+  // Plan gating: without `customDesign` the QR keeps the standard look and
+  // only the label text / position can be edited; SVG / PDF need `exports`.
+  const canCustomDesign = plan.customDesign;
+  const canExport = plan.exports;
+  const designPlan = featureMinPlanLabel("customDesign");
+  const exportPlan = featureMinPlanLabel("exports");
 
   const [name,        setName]        = useState("");
   const [description, setDescription] = useState("");
@@ -538,7 +559,35 @@ export default function CreateQr() {
   const [labelAlign,     setLabelAlign]     = useState<"left" | "center" | "right">("center");
 
   // Whether the current frame exposes a colored text zone (polaroid/banner/ticket/header).
-  const hasTextZone = FRAMES_WITH_LABEL_ZONE.includes(frameStyle);
+  const hasTextZone = canCustomDesign && FRAMES_WITH_LABEL_ZONE.includes(frameStyle);
+
+  // Effective appearance — what the preview shows and what gets saved. Plans
+  // without `customDesign` always get the standard style, whatever the
+  // (possibly hydrated from a higher plan) form state says.
+  const eff = canCustomDesign
+    ? {
+        style, cornerStyle, fg, bg, logoSel, logoSizePct, qrMargin, cornerColor,
+        gradient: gradientOn ? { from: gradientFrom, to: gradientTo, angle: gradientAngle } : null,
+        frameStyle, labelFont, labelFontSize, labelBold, labelItalic, labelUnderline, labelAlign,
+      }
+    : {
+        style: STANDARD_DESIGN.style as QrStyle,
+        cornerStyle: STANDARD_DESIGN.cornerStyle as CornerStyle,
+        fg: STANDARD_DESIGN.fg,
+        bg: STANDARD_DESIGN.bg,
+        logoSel: { kind: "none" } as LogoSelection,
+        logoSizePct: Math.round(STANDARD_DESIGN.logoSize * 100),
+        qrMargin: STANDARD_DESIGN.margin,
+        cornerColor: STANDARD_DESIGN.cornerColor,
+        gradient: null,
+        frameStyle: STANDARD_LABEL_FORMAT.frame as FrameStyle,
+        labelFont: STANDARD_LABEL_FORMAT.font,
+        labelFontSize: STANDARD_LABEL_FORMAT.size,
+        labelBold: STANDARD_LABEL_FORMAT.bold,
+        labelItalic: STANDARD_LABEL_FORMAT.italic,
+        labelUnderline: STANDARD_LABEL_FORMAT.underline,
+        labelAlign: STANDARD_LABEL_FORMAT.align as "left" | "center" | "right",
+      };
 
   // Text-zone colors — only meaningful when the frame has a label band.
   // Defaults: label text follows the frame inversion logic, band matches fg.
@@ -685,6 +734,9 @@ export default function CreateQr() {
         title: submitMode === "activate" ? "QR code activated" : "QR code saved",
         desc: submitMode === "activate" ? "It is now ready to scan." : "Saved to My QR codes.",
       });
+      // A QR code going live is a meaningful success — the right moment to
+      // let Shopify ask for a review (never on page load).
+      if (submitMode === "activate" && fetcher.data.active) void requestReview("qr-activated");
       if (submitMode === "saveExit") navigate("/app/qr-manager");
       // Surface a non-fatal warning if the Shopify discount couldn't be created.
       if ("discountWarning" in fetcher.data && fetcher.data.discountWarning) {
@@ -697,7 +749,7 @@ export default function CreateQr() {
     } else if ("error" in fetcher.data) {
       toast({
         type: "error",
-        title: fetcher.data.error === "quota" ? "Plan limit reached" : "Could not save",
+        title: fetcher.data.error === "quota" ? "Plan limit reached" : fetcher.data.error === "locked" ? "Feature locked" : "Could not save",
         desc: fetcher.data.message,
       });
     }
@@ -754,26 +806,26 @@ export default function CreateQr() {
     fd.set("target", effectiveTarget);
     if (shopifyRef) fd.set("shopifyRef", shopifyRef);
     fd.set("design", JSON.stringify({
-      style, cornerStyle, fg, bg,
-      withLogo: logoSel.kind !== "none",
-      logoBrand:    logoSel.kind === "brand"  ? logoSel.brandId       : null,
-      logoUrl:      logoSel.kind === "custom" ? logoSel.customUrl     : null,
-      logoAssetId:  logoSel.kind === "custom" ? logoSel.customAssetId : null,
-      logoSize:     logoSizePct / 100,
-      margin:       qrMargin,
-      cornerColor,
-      gradient:     gradientOn ? { from: gradientFrom, to: gradientTo, angle: gradientAngle } : null,
+      style: eff.style, cornerStyle: eff.cornerStyle, fg: eff.fg, bg: eff.bg,
+      withLogo: eff.logoSel.kind !== "none",
+      logoBrand:    eff.logoSel.kind === "brand"  ? eff.logoSel.brandId       : null,
+      logoUrl:      eff.logoSel.kind === "custom" ? eff.logoSel.customUrl     : null,
+      logoAssetId:  eff.logoSel.kind === "custom" ? eff.logoSel.customAssetId : null,
+      logoSize:     eff.logoSizePct / 100,
+      margin:       eff.qrMargin,
+      cornerColor:  eff.cornerColor,
+      gradient:     eff.gradient,
     }));
     fd.set("label", JSON.stringify({
       text: labelText,
       position: labelPos,
-      frame: frameStyle,
-      font: labelFont,
-      size: labelFontSize,
-      bold: labelBold,
-      italic: labelItalic,
-      underline: labelUnderline,
-      align: labelAlign,
+      frame: eff.frameStyle,
+      font: eff.labelFont,
+      size: eff.labelFontSize,
+      bold: eff.labelBold,
+      italic: eff.labelItalic,
+      underline: eff.labelUnderline,
+      align: eff.labelAlign,
       labelColor: hasTextZone ? labelTextColor : undefined,
       bandColor:  hasTextZone ? labelBgColor   : undefined,
     }));
@@ -798,6 +850,10 @@ export default function CreateQr() {
   async function handleDownload(format: DownloadFormat) {
     if (!savedQr) {
       toast({ type: "error", title: "Save first", desc: "Save this QR code before downloading it." });
+      return;
+    }
+    if (format !== "png" && !canExport) {
+      toast({ type: "info", title: `${format.toUpperCase()} download is locked`, desc: `Upgrade to ${exportPlan} for SVG and PDF files.` });
       return;
     }
     setDownloading(format);
@@ -998,13 +1054,13 @@ export default function CreateQr() {
   const previewLabel: QrLabelOpts = {
     text: labelText,
     position: labelPos,
-    frame: frameStyle,
-    font: labelFont,
-    size: labelFontSize,
-    bold: labelBold,
-    italic: labelItalic,
-    underline: labelUnderline,
-    align: labelAlign,
+    frame: eff.frameStyle,
+    font: eff.labelFont,
+    size: eff.labelFontSize,
+    bold: eff.labelBold,
+    italic: eff.labelItalic,
+    underline: eff.labelUnderline,
+    align: eff.labelAlign,
     labelColor: hasTextZone ? labelTextColor : undefined,
     bandColor:  hasTextZone ? labelBgColor   : undefined,
   };
@@ -1033,8 +1089,8 @@ export default function CreateQr() {
         {/* ══ LEFT — Form ══ */}
         <div className="col gap-4">
 
-          {/* Templates — saved design+label presets */}
-          {(templates.length > 0 || showTemplateSave) && (
+          {/* Templates — saved design+label presets (custom-design feature) */}
+          {canCustomDesign && (templates.length > 0 || showTemplateSave) && (
             <Card className="card-pad-lg">
               <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12 }}>
                 <div>
@@ -1103,7 +1159,7 @@ export default function CreateQr() {
           )}
 
           {/* Floating "Save as template" button shown when no templates exist yet */}
-          {templates.length === 0 && !showTemplateSave && (
+          {canCustomDesign && templates.length === 0 && !showTemplateSave && (
             <div style={{ textAlign: "right", margin: "-4px 0 0" }}>
               <Button size="sm" variant="ghost" icon="save" onClick={() => setShowTemplateSave(true)}>
                 Save this design as a template
@@ -1315,11 +1371,27 @@ export default function CreateQr() {
             <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12 }}>
               <div>
                 <div className="section-h" style={{ fontSize: 15, marginBottom: 4 }}>Design</div>
-                <div className="section-sub">Pattern, finders, colors and an optional logo at the center.</div>
+                <div className="section-sub">
+                  {canCustomDesign
+                    ? "Pattern, finders, colors and an optional logo at the center."
+                    : `Standard style on the ${plan.name} plan — dark modules on white, square pattern, no logo.`}
+                </div>
               </div>
-              <Button size="sm" variant="ghost" icon="undo" onClick={resetDesign} title="Reset design to defaults">Reset</Button>
+              {canCustomDesign && (
+                <Button size="sm" variant="ghost" icon="undo" onClick={resetDesign} title="Reset design to defaults">Reset</Button>
+              )}
             </div>
 
+            {!canCustomDesign ? (
+              <div className="mt-4">
+                <FeatureLock
+                  title="Logo, colors, shapes & gradients"
+                  desc={`Brand your QR codes with your logo, custom colors, rounded or dotted patterns and saved design templates on ${designPlan}.${isEditing ? " Designs saved on a higher plan come back as soon as you upgrade." : ""}`}
+                  plan={designPlan}
+                />
+              </div>
+            ) : (
+            <>
             <Field label="Pattern style" hint="Affects every module except the corner finders." className="mt-4">
               <div className="style-picker">
                 {QR_STYLES.map(s => (
@@ -1513,6 +1585,8 @@ export default function CreateQr() {
                 </div>
               )}
             </Field>
+            </>
+            )}
           </Card>
 
           {/* Label */}
@@ -1522,7 +1596,9 @@ export default function CreateQr() {
                 <div className="section-h" style={{ fontSize: 15, marginBottom: 4 }}>Label</div>
                 <div className="section-sub">Add text around the QR — "Scan me", a brand name, or a tagline.</div>
               </div>
-              <Button size="sm" variant="ghost" icon="undo" onClick={resetLabel} title="Reset label formatting to defaults">Reset</Button>
+              {canCustomDesign && (
+                <Button size="sm" variant="ghost" icon="undo" onClick={resetLabel} title="Reset label formatting to defaults">Reset</Button>
+              )}
             </div>
 
             <Field label="Text" hint={`${labelText.length}/20 chars · keep it short for the best read`} className="mt-4">
@@ -1534,6 +1610,7 @@ export default function CreateQr() {
               />
               {/* Rich text toolbar — font, size, B/I/U, alignment. Every change
                   reflects live in the preview on the right. */}
+              {canCustomDesign && (
               <div className="rte-bar" role="toolbar" aria-label="Label formatting">
                 <select
                   className="rte-select"
@@ -1634,6 +1711,7 @@ export default function CreateQr() {
                   </button>
                 </div>
               </div>
+              )}
             </Field>
 
             <Field label="Position" hint="Where the text sits relative to the QR." className="mt-4">
@@ -1647,6 +1725,18 @@ export default function CreateQr() {
               </div>
             </Field>
 
+            {!canCustomDesign && (
+              <div className="mt-4">
+                <FeatureLock
+                  compact
+                  title="Fonts, formatting & frames"
+                  desc={`Pick a font, size, bold / italic, and add a decorative frame around the QR on ${designPlan}.`}
+                  plan={designPlan}
+                />
+              </div>
+            )}
+
+            {canCustomDesign && (
             <Field
               label="Frame style"
               hint={
@@ -1670,6 +1760,7 @@ export default function CreateQr() {
                 ))}
               </div>
             </Field>
+            )}
 
             {hasTextZone && (
               <div className="grid grid-2 mt-4">
@@ -1865,7 +1956,7 @@ export default function CreateQr() {
               }}
             >
               {!valid ? (
-                <div style={{ width: 248, height: 248, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 8, background: bg, color: "var(--fg-subtle)", fontSize: 11.5, textAlign: "center", padding: 16, borderRadius: 12 }}>
+                <div style={{ width: 248, height: 248, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 8, background: eff.bg, color: "var(--fg-subtle)", fontSize: 11.5, textAlign: "center", padding: 16, borderRadius: 12 }}>
                   <Icon name="qr-code" size={28} />
                   <div>Name your QR code<br />to preview it.</div>
                 </div>
@@ -1875,15 +1966,15 @@ export default function CreateQr() {
                     key={renderToken}
                     text={previewText}
                     size={220}
-                    fg={fg}
-                    bg={bg}
-                    style={style}
-                    cornerStyle={cornerStyle}
-                    logo={logoSel}
-                    logoSize={logoSizePct / 100}
-                    margin={qrMargin}
-                    cornerColor={cornerColor}
-                    gradient={gradientOn ? { from: gradientFrom, to: gradientTo, angle: gradientAngle } : null}
+                    fg={eff.fg}
+                    bg={eff.bg}
+                    style={eff.style}
+                    cornerStyle={eff.cornerStyle}
+                    logo={eff.logoSel}
+                    logoSize={eff.logoSizePct / 100}
+                    margin={eff.qrMargin}
+                    cornerColor={eff.cornerColor}
+                    gradient={eff.gradient}
                     label={previewLabel}
                   />
                   <div className={`qr-loading-overlay ${generating ? "active" : ""}`}>
@@ -1946,7 +2037,6 @@ export default function CreateQr() {
                 {!savedQr ? "Save first to unlock activation and downloads." : activated ? "Changes can still be saved while this QR stays active." : "Saved drafts can be activated here or from My QR codes."}
               </div>
 
-              {activated && savedQr && <ReviewPrompt />}
 
               <div className="strong mt-2" style={{ fontSize: 12 }}>Scan URL</div>
               <div style={{ fontFamily: "var(--ff-mono)", fontSize: 11, padding: "8px 10px", background: "var(--bg-sunken)", border: "1px solid var(--border)", borderRadius: 6, display: "flex", alignItems: "center", gap: 8 }}>
@@ -1963,21 +2053,29 @@ export default function CreateQr() {
               </div>
 
               <div className="grid grid-3 gap-2 mt-2">
-                {(["png", "svg", "pdf"] as DownloadFormat[]).map(format => (
-                  <Button
-                    key={format}
-                    size="sm"
-                    variant="secondary"
-                    icon="download"
-                    disabled={!savedQr || downloading === format}
-                    title={!savedQr ? "Save this QR code before downloading it" : `Download ${format.toUpperCase()}`}
-                    onClick={() => handleDownload(format)}
-                    style={{ width: "100%" }}
-                  >
-                    {format.toUpperCase()}
-                  </Button>
-                ))}
+                {(["png", "svg", "pdf"] as DownloadFormat[]).map(format => {
+                  const locked = format !== "png" && !canExport;
+                  return (
+                    <Button
+                      key={format}
+                      size="sm"
+                      variant="secondary"
+                      icon={locked ? "lock" : "download"}
+                      disabled={!savedQr || downloading === format}
+                      title={!savedQr ? "Save this QR code before downloading it" : locked ? `${format.toUpperCase()} requires the ${exportPlan} plan` : `Download ${format.toUpperCase()}`}
+                      onClick={() => handleDownload(format)}
+                      style={{ width: "100%", ...(locked ? { opacity: 0.7 } : {}) }}
+                    >
+                      {format.toUpperCase()}
+                    </Button>
+                  );
+                })}
               </div>
+              {!canExport && (
+                <div className="text-xs muted" style={{ textAlign: "center" }}>
+                  SVG and PDF files are included from the {exportPlan} plan.
+                </div>
+              )}
 
               <Button size="md" variant="primary" icon="eye"
                 style={{ marginTop: 4 }}

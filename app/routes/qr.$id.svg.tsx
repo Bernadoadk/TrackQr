@@ -1,13 +1,18 @@
 import type { LoaderFunctionArgs } from "react-router";
 import prisma from "../db.server";
 import { scanUrl } from "../lib/qr.server";
+import { resolvePlan } from "../lib/plan.server";
+import { applyDesignEntitlement } from "../lib/qr-standard";
 import { renderQrSvg, type QrLabelOpts } from "../lib/qr-render";
 import { logoSvgDataUrl } from "../components/ui/LogoPicker";
 
 export const loader = async ({ params, request }: LoaderFunctionArgs) => {
   const id = params.id;
   if (!id) throw new Response("Missing id", { status: 400 });
-  const qr = await prisma.qrCode.findUnique({ where: { id } });
+  const qr = await prisma.qrCode.findUnique({
+    where: { id },
+    include: { shop: { include: { activeSubscription: { include: { plan: true } } } } },
+  });
   if (!qr) throw new Response("Not found", { status: 404 });
 
   const url = new URL(request.url);
@@ -15,8 +20,15 @@ export const loader = async ({ params, request }: LoaderFunctionArgs) => {
   const includeLabel = url.searchParams.get("plain") !== "1";
   const disposition = url.searchParams.get("download") === "1" ? "attachment" : "inline";
 
-  const design = qr.design as Record<string, unknown>;
-  const labelData = qr.label  as Record<string, unknown>;
+  // Plans without `customDesign` render every QR in the standard style, even
+  // codes designed on a higher plan before a downgrade.
+  const plan = await resolvePlan(qr.shop);
+  // Inline SVG feeds the in-app previews and the PNG download (rasterized in
+  // the browser); the SVG file itself is part of the `exports` feature.
+  if (disposition === "attachment" && !plan.exports) {
+    throw new Response("SVG export requires the Starter plan.", { status: 402 });
+  }
+  const { design, label: labelData } = applyDesignEntitlement(plan.customDesign, qr.design, qr.label);
 
   // Resolve logo to a data URL or absolute https URL.
   const logoBrand = (design.logoBrand as string | null | undefined) ?? null;

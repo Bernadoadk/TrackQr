@@ -23,6 +23,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { shop } = await requireShop(request);
   const url = new URL(request.url);
   const entitlements = await getPlanEntitlements(shop);
+  if (!entitlements.exports) throw new Response("CSV export requires the Starter plan.", { status: 402 });
   const items = await listQrCodes(shop.id, {
     query: url.searchParams.get("q") ?? undefined,
     type: coerceQrTypeFilter(url.searchParams.get("type")),

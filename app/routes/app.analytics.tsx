@@ -8,11 +8,13 @@ import {
   getKpis, getDailySeries, getDeviceBreakdown, getCountryBreakdown,
   getTopQrCodes, getRecentScans, type PeriodKey,
 } from "../lib/analytics.server";
+import { featureMinPlanLabel } from "../lib/plan.constants";
 import { Icon } from "../components/ui/Icon";
 import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
 import { Card, CardHead } from "../components/ui/Card";
 import { StatCard } from "../components/ui/StatCard";
+import { FeatureLock } from "../components/ui/FeatureLock";
 import { Select } from "../components/ui/Input";
 import { useToast } from "../components/ui/Toast";
 import { downloadFile } from "../lib/download.client";
@@ -27,13 +29,16 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     attribution: entitlements.attribution,
   };
 
-  const [kpis, series, devices, countries, topQr, recentScans] = await Promise.all([
+  // Plans without `detailedAnalytics` (Free) only get the scan counters:
+  // totals + scans per QR code. Breakdowns and the scan log stay locked.
+  const detailed = entitlements.detailedAnalytics;
+  const [kpis, topQr, series, devices, countries, recentScans] = await Promise.all([
     getKpis(shop.id, period, access),
-    getDailySeries(shop.id, period, access),
-    getDeviceBreakdown(shop.id, period, access),
-    getCountryBreakdown(shop.id, period, 8, access),
-    getTopQrCodes(shop.id, period, 5, access),
-    getRecentScans(shop.id, 10, access),
+    getTopQrCodes(shop.id, period, detailed ? 5 : 10, access),
+    detailed ? getDailySeries(shop.id, period, access) : Promise.resolve([]),
+    detailed ? getDeviceBreakdown(shop.id, period, access) : Promise.resolve([]),
+    detailed ? getCountryBreakdown(shop.id, period, 8, access) : Promise.resolve([]),
+    detailed ? getRecentScans(shop.id, 10, access) : Promise.resolve([]),
   ]);
 
   return {
@@ -46,7 +51,10 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     recentScans,
     shopDomain: shop.domain,
     canAttribution: entitlements.attribution,
+    canExport: entitlements.exports,
+    detailedAnalytics: detailed,
     historyDays: entitlements.historyDays,
+    planName: entitlements.planName,
   };
 };
 
@@ -128,8 +136,9 @@ export default function Analytics() {
 
   const scanData = data.series.map(s => s.scans);
   const convData = data.series.map(s => s.conversions);
-  const conversionLabel = data.canAttribution ? "Conversions" : "Conversions locked";
   const scansExportHref = embeddedResourceHref("/qr/scans.csv", searchParams, { period: data.period }, data.shopDomain);
+  const analyticsPlan = featureMinPlanLabel("detailedAnalytics");
+  const exportPlan = featureMinPlanLabel("exports");
 
   const updatePeriod = (period: string) => {
     const next = new URLSearchParams(searchParams);
@@ -138,6 +147,10 @@ export default function Analytics() {
   };
 
   const exportScans = async () => {
+    if (!data.canExport) {
+      toast({ type: "info", title: "CSV export is locked", desc: `Upgrade to ${exportPlan} to export your scans.` });
+      return;
+    }
     setExporting(true);
     try {
       await downloadFile(scansExportHref, `trackqr-scans-${data.period}.csv`);
@@ -156,6 +169,91 @@ export default function Analytics() {
     }
     toast({ type: "info", title: "Conversions locked", desc: "Upgrade to a plan with attribution to view conversion data." });
   };
+
+  if (!data.detailedAnalytics) {
+    return (
+      <>
+        <div className="page-head">
+          <div className="page-head-left">
+            <div className="page-eyebrow"><Icon name="bar-chart" size={11} /> Analytics · {data.planName} plan</div>
+            <h1 className="page-h1"><span className="em">Scan</span> counter</h1>
+            <div className="page-sub">
+              Total scans and scans per QR code over the last {data.historyDays ?? 30} days. Detailed analytics are available on {analyticsPlan}.
+            </div>
+          </div>
+          <div className="page-head-actions">
+            <Select
+              value={data.period}
+              onChange={e => updatePeriod(e.target.value)}
+              style={{ height: 34, width: 130 }}>
+              <option value="7d">Last 7 days</option>
+              <option value="14d">Last 14 days</option>
+              <option value="30d">Last 30 days</option>
+            </Select>
+            <Button variant="secondary" icon="lock" onClick={exportScans} title={`CSV export requires the ${exportPlan} plan`}>
+              Export
+            </Button>
+          </div>
+        </div>
+
+        <div className="grid grid-2">
+          <StatCard accent="blue"  label="Total scans"      value={fmtNum(data.kpis.totalScans)} icon="scan"    sub={`last ${data.period.replace("d", " days")}`} />
+          <StatCard accent="amber" label="QR codes scanned" value={data.topQr.filter(q => q.scans > 0).length} icon="qr-code" sub={`of ${data.topQr.length} codes`} />
+        </div>
+
+        <div className="grid grid-2 mt-6">
+          <Card>
+            <CardHead title="Scans per QR code" subtitle="Counter over the selected period" />
+            <table className="table">
+              <thead>
+                <tr>
+                  <th>Name</th>
+                  <th className="right">Scans</th>
+                </tr>
+              </thead>
+              <tbody>
+                {data.topQr.length === 0 ? (
+                  <tr><td colSpan={2} style={{ textAlign: "center", padding: "20px", color: "var(--fg-muted)" }}>No QR codes yet</td></tr>
+                ) : data.topQr.map(qr => (
+                  <tr key={qr.id}>
+                    <td style={{ fontWeight: 500, color: "var(--fg-strong)" }}>{qr.name}</td>
+                    <td className="num right">{fmtNum(qr.scans)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </Card>
+
+          <Card>
+            <CardHead title="Detailed analytics" subtitle={`Included from the ${analyticsPlan} plan`} />
+            <div style={{ padding: "0 18px 18px" }}>
+              <ul className="pricing-features" style={{ listStyle: "none", padding: 0, margin: "0 0 16px", display: "flex", flexDirection: "column", gap: 9 }}>
+                {[
+                  "Scans over time, day by day",
+                  "Breakdown by device, OS and browser",
+                  "Top countries",
+                  "Unique visitors and recent scan log",
+                  "CSV export of every scan",
+                  "90-day history (unlimited on Growth)",
+                ].map(label => (
+                  <li key={label} style={{ display: "flex", alignItems: "flex-start", gap: 8, fontSize: 13, color: "var(--fg)" }}>
+                    <Icon name="circle-check" size={13} style={{ color: "var(--green)", marginTop: 2, flexShrink: 0 }} />
+                    <span>{label}</span>
+                  </li>
+                ))}
+              </ul>
+              <FeatureLock
+                compact
+                title="Unlock detailed analytics"
+                desc="See where, when and how your codes are scanned."
+                plan={analyticsPlan}
+              />
+            </div>
+          </Card>
+        </div>
+      </>
+    );
+  }
 
   return (
     <>
@@ -177,7 +275,7 @@ export default function Analytics() {
             <option value="30d">Last 30 days</option>
             <option value="90d">Last 90 days</option>
           </Select>
-          <Button variant="secondary" icon="download" onClick={exportScans} disabled={exporting}>
+          <Button variant="secondary" icon={data.canExport ? "download" : "lock"} onClick={exportScans} disabled={exporting}>
             {exporting ? "Exporting..." : "Export"}
           </Button>
         </div>
@@ -186,8 +284,8 @@ export default function Analytics() {
       {/* KPIs */}
       <div className="grid grid-4">
         <StatCard accent="blue"   label="Total scans"     value={fmtNum(data.kpis.totalScans)}        icon="scan"        sparklineData={scanData} sub={`${data.series.length}-day window`} />
-        <StatCard accent="green"  label={conversionLabel} value={data.canAttribution ? fmtNum(data.kpis.totalConversions) : "Growth"} icon="trending-up" sparklineData={data.canAttribution ? convData : undefined} />
-        <StatCard accent="violet" label="Conv. rate"      value={data.canAttribution ? data.kpis.convRate.toFixed(2) + "%" : "Growth"} icon="zap" />
+        <StatCard accent="green"  label="Conversions"     value={data.canAttribution ? fmtNum(data.kpis.totalConversions) : "Locked"} icon={data.canAttribution ? "trending-up" : "lock"} sub={data.canAttribution ? undefined : "Growth plan"} sparklineData={data.canAttribution ? convData : undefined} />
+        <StatCard accent="violet" label="Conv. rate"      value={data.canAttribution ? data.kpis.convRate.toFixed(2) + "%" : "Locked"} icon={data.canAttribution ? "zap" : "lock"} sub={data.canAttribution ? undefined : "Growth plan"} />
         <StatCard accent="amber"  label="Unique visitors" value={fmtNum(data.kpis.uniqueVisitors)}    icon="users"       sub="by session token" />
       </div>
 
@@ -245,7 +343,7 @@ export default function Analytics() {
           <CardHead title="Top countries" subtitle="By scan volume" />
           <div style={{ padding: "6px 18px 14px" }}>
             {data.countries.length === 0 ? (
-              <div className="text-sm muted" style={{ textAlign: "center", padding: "24px 0" }}>No geo data yet — requires Cloudflare CF-IPCountry header in production.</div>
+              <div className="text-sm muted" style={{ textAlign: "center", padding: "24px 0" }}>No geo data yet — countries come from the hosting provider's geolocation header (Vercel, Cloudflare, CloudFront).</div>
             ) : data.countries.map(g => (
               <div key={g.country} className="progress-row">
                 <span className="progress-flag">{countryFlag(g.country)}</span>

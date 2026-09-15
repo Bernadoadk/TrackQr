@@ -15,6 +15,10 @@ type ShopifySessionStorage = NonNullable<ShopifyAppConfig["sessionStorage"]>;
 const prismaSessionStorage =
   new PrismaSessionStorage(prisma) as unknown as ShopifySessionStorage;
 
+/**
+ * Shopify managed-billing plan names. The Free plan has no entry on purpose:
+ * it is the absence of a subscription (see app/lib/plan.server.ts).
+ */
 export const TRACKQR_BILLING_PLAN_NAMES = {
   starter: {
     MONTHLY: "TrackQr Starter",
@@ -24,10 +28,12 @@ export const TRACKQR_BILLING_PLAN_NAMES = {
     MONTHLY: "TrackQr Growth",
     ANNUAL: "TrackQr Growth Annual",
   },
-  pro: {
-    MONTHLY: "TrackQr Pro",
-    ANNUAL: "TrackQr Pro Annual",
-  },
+} as const;
+
+/** USD amounts charged through Shopify — keep in sync with the Plan seed. */
+export const TRACKQR_BILLING_AMOUNTS = {
+  starter: { MONTHLY: 9.0, ANNUAL: 84.0 },
+  growth: { MONTHLY: 29.0, ANNUAL: 276.0 },
 } as const;
 
 export type TrackQrBillingPlanId = keyof typeof TRACKQR_BILLING_PLAN_NAMES;
@@ -96,7 +102,7 @@ const shopify = shopifyApp({
       replacementBehavior: BillingReplacementBehavior.ApplyImmediately,
       lineItems: [
         {
-          amount: 19.0,
+          amount: TRACKQR_BILLING_AMOUNTS.starter.MONTHLY,
           currencyCode: "USD",
           interval: BillingInterval.Every30Days,
         },
@@ -106,7 +112,7 @@ const shopify = shopifyApp({
       replacementBehavior: BillingReplacementBehavior.ApplyImmediately,
       lineItems: [
         {
-          amount: 180.0,
+          amount: TRACKQR_BILLING_AMOUNTS.starter.ANNUAL,
           currencyCode: "USD",
           interval: BillingInterval.Annual,
         },
@@ -116,7 +122,7 @@ const shopify = shopifyApp({
       replacementBehavior: BillingReplacementBehavior.ApplyImmediately,
       lineItems: [
         {
-          amount: 49.0,
+          amount: TRACKQR_BILLING_AMOUNTS.growth.MONTHLY,
           currencyCode: "USD",
           interval: BillingInterval.Every30Days,
         },
@@ -126,27 +132,7 @@ const shopify = shopifyApp({
       replacementBehavior: BillingReplacementBehavior.ApplyImmediately,
       lineItems: [
         {
-          amount: 468.0,
-          currencyCode: "USD",
-          interval: BillingInterval.Annual,
-        },
-      ],
-    },
-    [TRACKQR_BILLING_PLAN_NAMES.pro.MONTHLY]: {
-      replacementBehavior: BillingReplacementBehavior.ApplyImmediately,
-      lineItems: [
-        {
-          amount: 129.0,
-          currencyCode: "USD",
-          interval: BillingInterval.Every30Days,
-        },
-      ],
-    },
-    [TRACKQR_BILLING_PLAN_NAMES.pro.ANNUAL]: {
-      replacementBehavior: BillingReplacementBehavior.ApplyImmediately,
-      lineItems: [
-        {
-          amount: 1236.0,
+          amount: TRACKQR_BILLING_AMOUNTS.growth.ANNUAL,
           currencyCode: "USD",
           interval: BillingInterval.Annual,
         },

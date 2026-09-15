@@ -19,18 +19,21 @@ type CampaignLandingData = {
 
 export const loader = async ({ request, params }: LoaderFunctionArgs) => {
   if (!params.slug) throw new Response("Not found", { status: 404 });
-  const { getCampaignBySlug } = await import("../lib/campaign.server");
-  const { isShopAccessActive, pauseShopPublicSurfaces } = await import("../lib/plan.server");
+  const { getCampaignBySlug, pauseCampaignById } = await import("../lib/campaign.server");
+  const { getBillingAccess, isOverQuota } = await import("../lib/plan.server");
   const campaign = await getCampaignBySlug(params.slug);
   if (!campaign) throw new Response("Not found", { status: 404 });
-  if (!(await isShopAccessActive(campaign.shop))) {
-    await pauseShopPublicSurfaces(campaign.shopId);
-    throw new Response("This campaign is unavailable until the merchant reactivates TrackQr billing.", { status: 402 });
-  }
+  const access = await getBillingAccess(campaign.shop);
   const canPreview = new URL(request.url).searchParams.get("preview") === "1"
     ? await canPreviewCampaign(request, campaign.shopId)
     : false;
 
+  // Plan quota gate — a campaign beyond the store's plan limit is paused here
+  // even if no admin page was opened since the downgrade.
+  if (!canPreview && await isOverQuota("campaigns", campaign, access.plan.campaignLimit)) {
+    await pauseCampaignById(campaign.id);
+    throw new Response("This campaign is paused — the store's TrackQr plan limit was reached.", { status: 423 });
+  }
   if (campaign.status === "DRAFT" && !canPreview) {
     throw new Response("This campaign is not published yet.", { status: 423 });
   }
@@ -42,7 +45,12 @@ export const loader = async ({ request, params }: LoaderFunctionArgs) => {
   }
 
   const { campaignLandingData } = await import("../lib/campaign-landing.server");
-  return campaignLandingData(campaign, canPreview);
+  return campaignLandingData(campaign, {
+    isPreview: canPreview,
+    customDesign: access.plan.customDesign,
+    // The "Powered by TrackQr" watermark is only removable on a paid plan.
+    forcePoweredBy: access.status !== "active",
+  });
 };
 
 async function canPreviewCampaign(request: Request, shopId: string) {
@@ -63,12 +71,14 @@ export const action = async ({ request, params }: ActionFunctionArgs) => {
   ]);
   const campaign = await getCampaignBySlug(params.slug);
   if (!campaign) return { ok: false, error: "not-found" } as const;
-  const { isShopAccessActive, pauseShopPublicSurfaces } = await import("../lib/plan.server");
-  if (!(await isShopAccessActive(campaign.shop))) {
-    await pauseShopPublicSurfaces(campaign.shopId);
-    return { ok: false, error: "billing-required" } as const;
-  }
   if (campaign.status !== "ACTIVE") return { ok: false, error: "inactive" } as const;
+  const { isOverQuota, resolvePlan } = await import("../lib/plan.server");
+  const plan = await resolvePlan(campaign.shop);
+  if (await isOverQuota("campaigns", campaign, plan.campaignLimit)) {
+    const { pauseCampaignById } = await import("../lib/campaign.server");
+    await pauseCampaignById(campaign.id);
+    return { ok: false, error: "inactive" } as const;
+  }
 
   const form = await request.formData();
   const email = String(form.get("email") ?? "").trim();

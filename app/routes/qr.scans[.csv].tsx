@@ -10,6 +10,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const url = new URL(request.url);
   const period = (url.searchParams.get("period") as PeriodKey) || "30d";
   const entitlements = await getPlanEntitlements(shop);
+  if (!entitlements.exports) throw new Response("CSV export requires the Starter plan.", { status: 402 });
   const { from } = limitedPeriodRange(period, entitlements);
   const includeConversions = entitlements.attribution;
 

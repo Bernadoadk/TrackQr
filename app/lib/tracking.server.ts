@@ -30,6 +30,24 @@ function extractIp(req: Request): string | null {
   return null;
 }
 
+/**
+ * ISO-3166 alpha-2 country injected by the edge / reverse proxy in front of
+ * the app. Vercel (production host), Cloudflare and CloudFront each use their
+ * own header; a generic X-Country-Code is accepted for other setups.
+ */
+function extractCountry(req: Request): string | null {
+  const h = req.headers;
+  const raw =
+    h.get("X-Vercel-IP-Country") ||
+    h.get("CF-IPCountry") ||
+    h.get("CloudFront-Viewer-Country") ||
+    h.get("X-Country-Code");
+  if (!raw) return null;
+  const code = raw.trim().toUpperCase();
+  // "XX" (Cloudflare unknown) and "T1" (Tor) carry no usable geography.
+  return /^[A-Z]{2}$/.test(code) && code !== "XX" && code !== "T1" ? code : null;
+}
+
 function readSessionCookie(req: Request): string | null {
   const raw = req.headers.get("Cookie");
   if (!raw) return null;
@@ -54,7 +72,7 @@ export function parseRequest(req: Request): ParsedRequest {
     kind === "wearable" || kind === "embedded" ? "MOBILE" :
     ua ? "DESKTOP" : "UNKNOWN";
 
-  const country = req.headers.get("CF-IPCountry");
+  const country = extractCountry(req);
   const ip = extractIp(req);
 
   let sessionToken = readSessionCookie(req);
@@ -67,7 +85,7 @@ export function parseRequest(req: Request): ParsedRequest {
 
   return {
     ip,
-    country: country && country !== "XX" ? country : null,
+    country,
     device: deviceType,
     os:      os.name      || null,
     browser: browser.name || null,

@@ -64,20 +64,23 @@ model Shop {
 }
 
 /* ─────────────────────────────────────────────────────────
-   Plan — seed table: Starter / Growth / Pro
+   Plan — seed table: Free / Starter / Growth
    ───────────────────────────────────────────────────────── */
 model Plan {
-  id              String   @id  // "starter" | "growth" | "pro"
+  id              String   @id  // "free" | "starter" | "growth"
   name            String
   priceMonthly    Int      // in cents (USD)
   priceAnnual     Int      // /mo billed annually (cents)
-  trialDays       Int      @default(14)
+  trialDays       Int      @default(0)
   // Quotas (null = unlimited)
   qrCodeLimit     Int?
   campaignLimit   Int?
   // History retention in days (null = unlimited)
   historyDays     Int?
   // Feature flags
+  customDesign      Boolean @default(false) // logo, colors, shapes, frames, templates
+  detailedAnalytics Boolean @default(false) // timeline, device / country breakdowns
+  exports           Boolean @default(false) // CSV exports + SVG / PDF downloads
   attribution     Boolean  @default(false)
   integrations    Boolean  @default(false)
   multiStore      Boolean  @default(false)
@@ -181,6 +184,9 @@ model QrCode {
 
   @@index([shopId, createdAt])
   @@index([shopId, active])
+  // Lifecycle indexes created by 20260524_trackqr_advanced_features.
+  @@index([expiresAt])
+  @@index([activatesAt])
 }
 
 /* ─────────────────────────────────────────────────────────

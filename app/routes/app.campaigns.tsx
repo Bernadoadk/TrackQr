@@ -4,7 +4,8 @@ import { useNavigate, useLoaderData, useFetcher, useSearchParams } from "react-r
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { requireShop } from "../lib/shop.server";
 import { listCampaigns, createCampaign, setCampaignStatus, deleteCampaign, duplicateCampaign } from "../lib/campaign.server";
-import { getPlanEntitlements, QuotaExceededError } from "../lib/plan.server";
+import { getPlanEntitlements, getQuotaState, QuotaExceededError } from "../lib/plan.server";
+import { featureMinPlanLabel } from "../lib/plan.constants";
 import type { CampaignStatus } from "@prisma/client";
 import { Icon } from "../components/ui/Icon";
 import { Button } from "../components/ui/Button";
@@ -18,15 +19,22 @@ import { ConfirmDialog } from "../components/ui/ConfirmDialog";
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { shop } = await requireShop(request);
   const entitlements = await getPlanEntitlements(shop);
-  const items = await listCampaigns(shop.id, {
-    earliestScanDate: entitlements.earliestScanDate,
-    attribution: entitlements.attribution,
-  });
+  const [items, quota] = await Promise.all([
+    listCampaigns(shop.id, {
+      earliestScanDate: entitlements.earliestScanDate,
+      attribution: entitlements.attribution,
+    }),
+    getQuotaState(shop.id, "campaigns", entitlements.campaignLimit),
+  ]);
   return {
     items,
     shopDomain: shop.domain,
     canAttribution: entitlements.attribution,
+    canExport: entitlements.exports,
     historyDays: entitlements.historyDays,
+    planName: entitlements.planName,
+    campaignLimit: entitlements.campaignLimit,
+    overQuotaIds: quota.overQuotaIds,
   };
 };
 
@@ -49,7 +57,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       case "status": {
         const id = String(form.get("id") ?? "");
         const status = String(form.get("status") ?? "") as CampaignStatus;
-        await setCampaignStatus(shop.id, id, status);
+        await setCampaignStatus(shop, id, status);
         return { ok: true, intent, id } as const;
       }
       case "delete": {
@@ -156,9 +164,11 @@ function NewCampaignModal({ onClose, fetcher }: { onClose: () => void; fetcher: 
 export default function Campaigns() {
   const navigate = useNavigate();
   const toast    = useToast();
-  const { items, shopDomain, canAttribution, historyDays } = useLoaderData<typeof loader>();
+  const { items, shopDomain, canAttribution, canExport, historyDays, planName, campaignLimit, overQuotaIds } = useLoaderData<typeof loader>();
   const fetcher  = useFetcher<typeof action>();
   const [searchParams] = useSearchParams();
+  const overQuota = new Set(overQuotaIds);
+  const exportPlan = featureMinPlanLabel("exports");
 
   const [query,  setQuery]  = useState("");
   const [status, setStatus] = useState<string>("all");
@@ -229,7 +239,7 @@ export default function Campaigns() {
       {/* Header */}
       <div className="page-head">
         <div className="page-head-left">
-          <div className="page-eyebrow"><Icon name="megaphone" size={11} /> {totalActive} running</div>
+          <div className="page-eyebrow"><Icon name="megaphone" size={11} /> {totalActive} running · {items.length}{campaignLimit != null ? ` / ${campaignLimit}` : ""} on {planName}</div>
           <h1 className="page-h1"><span className="em">Campaigns</span></h1>
           <div className="page-sub">Landing pages built block-by-block, attached to a QR code. Scan stats show {historyDays ? `the last ${historyDays} days` : "full history"}.</div>
         </div>
@@ -242,7 +252,7 @@ export default function Campaigns() {
         <StatCard accent="green"  label="Active"       value={totalActive}      icon="play"     sub={`of ${items.length} total`} />
         <StatCard accent="violet" label="Total leads"  value={fmt(totalLeads)}  icon="mail" />
         <StatCard accent="blue"   label="Total scans"  value={fmt(totalScans)}  icon="scan" />
-        <StatCard accent="amber"  label={canAttribution ? "Conversions" : "Conversions locked"} value={canAttribution ? fmt(totalConv) : "Growth"} icon="zap" />
+        <StatCard accent="amber"  label="Conversions" value={canAttribution ? fmt(totalConv) : "Locked"} icon={canAttribution ? "zap" : "lock"} sub={canAttribution ? undefined : "Growth plan"} />
       </div>
 
       <div className="toolbar mb-4">
@@ -288,7 +298,9 @@ export default function Campaigns() {
               <Button variant="secondary" style={{ marginTop: 16 }} onClick={() => { setQuery(""); setStatus("all"); }}>Clear filters</Button>
             </div>
           </Card>
-        ) : filtered.map(c => (
+        ) : filtered.map(c => {
+          const isOverQuota = overQuota.has(c.id);
+          return (
           <Card key={c.id} hoverLift className="card-pad" style={{ cursor: "default" }}>
             <div className="flex gap-4 items-start">
               <div style={{
@@ -303,6 +315,9 @@ export default function Campaigns() {
                 <div className="flex items-center gap-3 mb-2">
                   <div className="strong" style={{ fontFamily: "var(--ff-display)", fontSize: 16, letterSpacing: "-0.012em" }}>{c.name}</div>
                   <Badge tone={STATUS_TONE[c.status]} dot>{STATUS_LABEL[c.status]}</Badge>
+                  {isOverQuota && (
+                    <Badge tone="warning" dot>Over plan limit</Badge>
+                  )}
                 </div>
                 {c.description && <div className="text-sm muted mb-3" style={{ maxWidth: 600 }}>{c.description}</div>}
                 <div className="flex items-center gap-6 text-sm muted" style={{ fontFamily: "var(--ff-mono)", fontSize: 11.5 }}>
@@ -335,13 +350,30 @@ export default function Campaigns() {
                   </Button>
                 )}
                 {c.status === "PAUSED" && (
-                  <Button variant="ghost" size="sm" onClick={() => submitIntent("status", c.id, { status: "ACTIVE" })}>
-                    <Icon name="play" size={13} />
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    disabled={isOverQuota}
+                    title={isOverQuota ? `Beyond your ${planName} plan limit — delete older campaigns or upgrade to reactivate` : "Resume campaign"}
+                    onClick={() => submitIntent("status", c.id, { status: "ACTIVE" })}
+                  >
+                    <Icon name={isOverQuota ? "lock" : "play"} size={13} />
                   </Button>
                 )}
-                <a href={embeddedResourceHref(`/c/${c.slug}/leads.csv`, searchParams, shopDomain)} target="_blank" rel="noopener noreferrer">
-                  <Button variant="ghost" size="sm"><Icon name="download" size={13} /></Button>
-                </a>
+                {canExport ? (
+                  <a href={embeddedResourceHref(`/c/${c.slug}/leads.csv`, searchParams, shopDomain)} target="_blank" rel="noopener noreferrer">
+                    <Button variant="ghost" size="sm" title="Download leads (CSV)"><Icon name="download" size={13} /></Button>
+                  </a>
+                ) : (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    title={`Lead export requires the ${exportPlan} plan`}
+                    onClick={() => toast({ type: "info", title: "CSV export is locked", desc: `Upgrade to ${exportPlan} to download campaign leads.` })}
+                  >
+                    <Icon name="lock" size={13} />
+                  </Button>
+                )}
                 <Button variant="ghost" size="sm" onClick={() => submitIntent("duplicate", c.id)}>
                   <Icon name="copy" size={13} />
                 </Button>
@@ -353,7 +385,8 @@ export default function Campaigns() {
               </div>
             </div>
           </Card>
-        ))}
+          );
+        })}
       </div>
     </>
   );

@@ -3,10 +3,13 @@ import { requireShop } from "../lib/shop.server";
 import { getCampaignBySlug } from "../lib/campaign.server";
 import { listLeads } from "../lib/leads.server";
 import { csvCell } from "../lib/csv.server";
+import { getPlanEntitlements } from "../lib/plan.server";
 
 export const loader = async ({ request, params }: LoaderFunctionArgs) => {
   const { shop } = await requireShop(request);
   if (!params.slug) throw new Response("Missing slug", { status: 400 });
+  const entitlements = await getPlanEntitlements(shop);
+  if (!entitlements.exports) throw new Response("CSV export requires the Starter plan.", { status: 402 });
   const campaign = await getCampaignBySlug(params.slug);
   if (!campaign || campaign.shopId !== shop.id) throw new Response("Not found", { status: 404 });
 

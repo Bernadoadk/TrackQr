@@ -101,10 +101,14 @@ export function normalizeCampaignPageSettings(value: unknown): CampaignPageSetti
   };
 }
 
-export function campaignPageSettingsForPlan(value: unknown, isTrial: boolean): CampaignPageSettings {
+/**
+ * The "Powered by TrackQr" watermark is forced on stores without a paid
+ * subscription (Free plan) and removable otherwise.
+ */
+export function campaignPageSettingsForPlan(value: unknown, forcePoweredBy: boolean): CampaignPageSettings {
   const settings = normalizeCampaignPageSettings(value);
   return {
     ...settings,
-    showPoweredBy: isTrial,
+    showPoweredBy: forcePoweredBy,
   };
 }

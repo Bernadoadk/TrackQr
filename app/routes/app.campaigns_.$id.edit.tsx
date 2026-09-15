@@ -5,6 +5,8 @@ import { boundary } from "@shopify/shopify-app-react-router/server";
 import { siFacebook, siInstagram, siTiktok, siX } from "simple-icons";
 import { requireShop } from "../lib/shop.server";
 import { getCampaign, listCampaignBlockQrChoices, saveBlocks, setCampaignStatus } from "../lib/campaign.server";
+import { getPlanEntitlements, QuotaExceededError } from "../lib/plan.server";
+import { applyDesignEntitlement } from "../lib/qr-standard";
 import type { CampaignStatus } from "@prisma/client";
 import { Icon } from "../components/ui/Icon";
 import { Button } from "../components/ui/Button";
@@ -15,13 +17,17 @@ import { useToast } from "../components/ui/Toast";
 import { renderQrSvg } from "../lib/qr-render";
 import { LABEL_FONTS, LABEL_FONT_GROUPS, DEFAULT_FONT, getLabelFont } from "../lib/label-fonts";
 import { DEFAULT_CAMPAIGN_PAGE_SETTINGS, campaignPageSettingsForPlan, normalizeCampaignPageSettings, type CampaignPageSettings } from "../lib/campaign-settings";
+import { useReviewRequest } from "../lib/use-review-request";
 
 export const loader = async ({ request, params }: LoaderFunctionArgs) => {
   const { shop } = await requireShop(request);
   if (!params.id) throw new Response("Missing id", { status: 400 });
   const campaign = await getCampaign(shop.id, params.id);
   if (!campaign) throw new Response("Not found", { status: 404 });
-  const qrChoices = await listCampaignBlockQrChoices(shop.id);
+  const [qrChoices, entitlements] = await Promise.all([
+    listCampaignBlockQrChoices(shop.id),
+    getPlanEntitlements(shop),
+  ]);
   const appUrl = (process.env.SHOPIFY_APP_URL ?? "").replace(/\/$/, "");
   return {
     campaign: {
@@ -32,20 +38,25 @@ export const loader = async ({ request, params }: LoaderFunctionArgs) => {
       settings: normalizeCampaignPageSettings(campaign.settings),
       blocks: (campaign.blocks as unknown) as Array<{ id: string; type: string; props: Record<string, unknown>; layout: { padding: string; align: string; bg: string }; visibility: { mobile: boolean; desktop: boolean } }>,
     },
-    isTrial: !shop.activeSubscription,
+    // The "Powered by TrackQr" watermark is forced on the Free plan.
+    isFreePlan: entitlements.status !== "active",
     shopDomain: shop.domain,
-    qrChoices: qrChoices.map(q => ({
-      id: q.id,
-      name: q.name,
-      slug: q.slug,
-      type: q.type,
-      target: q.target,
-      active: q.active,
-      campaignId: q.campaignId,
-      design: q.design,
-      label: q.label,
-      scanUrl: appUrl ? `${appUrl}/s/${q.slug}` : `/s/${q.slug}`,
-    })),
+    qrChoices: qrChoices.map(q => {
+      // Embedded QR previews follow the plan's design rules (standard style without `customDesign`).
+      const appearance = applyDesignEntitlement(entitlements.customDesign, q.design, q.label);
+      return {
+        id: q.id,
+        name: q.name,
+        slug: q.slug,
+        type: q.type,
+        target: q.target,
+        active: q.active,
+        campaignId: q.campaignId,
+        design: appearance.design,
+        label: appearance.label,
+        scanUrl: appUrl ? `${appUrl}/s/${q.slug}` : `/s/${q.slug}`,
+      };
+    }),
   };
 };
 
@@ -71,19 +82,22 @@ export const action = async ({ request, params }: ActionFunctionArgs) => {
         const settings = normalizeCampaignPageSettings(JSON.parse(String(form.get("settings") ?? "{}")));
         await saveBlocks(shop.id, params.id, blocks, name, settings);
       }
-      await setCampaignStatus(shop.id, params.id, "ACTIVE");
+      await setCampaignStatus(shop, params.id, "ACTIVE");
       return { ok: true, status: "ACTIVE" as CampaignStatus } as const;
     }
     if (intent === "pause") {
-      await setCampaignStatus(shop.id, params.id, "PAUSED");
+      await setCampaignStatus(shop, params.id, "PAUSED");
       return { ok: true, status: "PAUSED" as CampaignStatus } as const;
     }
     if (intent === "draft") {
-      await setCampaignStatus(shop.id, params.id, "DRAFT");
+      await setCampaignStatus(shop, params.id, "DRAFT");
       return { ok: true, status: "DRAFT" as CampaignStatus } as const;
     }
     return { ok: false, error: "unknown" } as const;
   } catch (err) {
+    if (err instanceof QuotaExceededError) {
+      return { ok: false, error: "quota", message: err.message } as const;
+    }
     return { ok: false, error: "server", message: err instanceof Error ? err.message : "" } as const;
   }
 };
@@ -1353,11 +1367,11 @@ function BlockFields({ block, set, setMany, actions, qrChoices }: { block: Block
   }
 }
 
-function PageSettingsPanel({ settings, update, actions, isTrial }: {
+function PageSettingsPanel({ settings, update, actions, isFreePlan }: {
   settings: CampaignPageSettings;
   update: <K extends keyof CampaignPageSettings>(key: K, value: CampaignPageSettings[K]) => void;
   actions: BlockEditorActions;
-  isTrial: boolean;
+  isFreePlan: boolean;
 }) {
   return (
     <>
@@ -1506,7 +1520,7 @@ function PageSettingsPanel({ settings, update, actions, isTrial }: {
         </Field>
         <div className="prop-row prop-row-h">
           <span className="prop-label">Powered by TrackQR watermark</span>
-          <Badge>{isTrial ? "Visible on trial" : "Hidden on paid plan"}</Badge>
+          <Badge>{isFreePlan ? "Visible on the Free plan" : "Hidden on paid plans"}</Badge>
         </div>
       </div>
     </>
@@ -1735,7 +1749,8 @@ function EditorTopBar({ campaignName, setCampaignName, device, setDevice, onNavi
 export default function CampaignEditor() {
   const navigate = useNavigate();
   const toast    = useToast();
-  const { campaign, qrChoices, isTrial } = useLoaderData<typeof loader>();
+  const requestReview = useReviewRequest();
+  const { campaign, qrChoices, isFreePlan } = useLoaderData<typeof loader>();
   const fetcher = useFetcher<typeof action>();
 
   const initialBlocks: Block[] = (campaign.blocks?.length ? campaign.blocks : STARTER_BLOCKS.map(makeBlock)) as Block[];
@@ -1795,10 +1810,18 @@ export default function CampaignEditor() {
     if (fetcher.state !== "idle" || !fetcher.data) return;
     if (fetcher.data.ok) {
       setSaveState("saved");
-      if ("status" in fetcher.data && fetcher.data.status) setStatus(fetcher.data.status);
+      if ("status" in fetcher.data && fetcher.data.status) {
+        setStatus(fetcher.data.status);
+        // Only the publish intent answers with ACTIVE: the page just went live.
+        if (fetcher.data.status === "ACTIVE") void requestReview("campaign-published");
+      }
     } else {
       setSaveState("error");
-      toast({ type: "error", title: "Save failed", desc: fetcher.data.message ?? "Try again." });
+      toast({
+        type: "error",
+        title: fetcher.data.error === "quota" ? "Plan limit reached" : "Save failed",
+        desc: fetcher.data.message ?? "Try again.",
+      });
     }
   }, [fetcher.state, fetcher.data]);
 
@@ -1886,7 +1909,7 @@ export default function CampaignEditor() {
 
   const selected    = blocks.find(b => b.id === selectedId) ?? null;
   const pageSelected = selectedId === PAGE_SETTINGS_ID;
-  const effectivePageSettings = campaignPageSettingsForPlan(pageSettings, isTrial);
+  const effectivePageSettings = campaignPageSettingsForPlan(pageSettings, isFreePlan);
   const pageCanvasStyle = {
     "--editor-page-accent": effectivePageSettings.accentColor,
     background: effectivePageSettings.pageBgColor || (effectivePageSettings.theme === "light" ? "#F8FAFC" : "#0B1220"),
@@ -2189,7 +2212,7 @@ export default function CampaignEditor() {
           </div>
           <div className="scroll" style={{ overflow: "auto", flex: 1 }}>
             {pageSelected ? (
-              <PageSettingsPanel settings={pageSettings} update={updatePageSetting} actions={actions} isTrial={isTrial} />
+              <PageSettingsPanel settings={pageSettings} update={updatePageSetting} actions={actions} isFreePlan={isFreePlan} />
             ) : !selected ? (
               <div className="empty">
                 <div className="empty-icon"><Icon name="panel-left" /></div>

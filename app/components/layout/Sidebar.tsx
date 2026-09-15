@@ -18,9 +18,15 @@ const SECONDARY = [
 ];
 
 const PLAN_ICON: Record<string, string> = {
+  free:    "gift",
   starter: "rocket",
   growth:  "zap",
-  pro:     "sparkles",
+};
+
+const UPGRADE_TARGET: Record<string, string | null> = {
+  free:    "Starter",
+  starter: "Growth",
+  growth:  null,
 };
 
 interface SidebarProps {
@@ -34,12 +40,13 @@ export function Sidebar({ theme, onTheme }: SidebarProps) {
   const appData  = useRouteLoaderData("routes/app") as AppRouteLoaderData | undefined;
 
   const usage = appData?.usage;
-  const planId   = usage?.planId   ?? "starter";
-  const planName = usage?.planName ?? "Starter";
-  const planIcon = PLAN_ICON[planId] ?? "rocket";
+  const planId   = usage?.planId   ?? "free";
+  const planName = usage?.planName ?? "Free";
+  const planIcon = PLAN_ICON[planId] ?? "gift";
   const qrUsed   = usage?.qrUsed   ?? 0;
   const qrLimit  = usage?.qrLimit  ?? null;
-  const upgradeTarget = planId === "starter" ? "Growth" : planId === "growth" ? "Pro" : null;
+  const overQuota = (usage?.qrOverQuota ?? 0) + (usage?.campaignOverQuota ?? 0);
+  const upgradeTarget = UPGRADE_TARGET[planId] ?? null;
 
   const isActive = (path: string) => {
     if (path === "/app") return location.pathname === "/app";
@@ -125,7 +132,9 @@ export function Sidebar({ theme, onTheme }: SidebarProps) {
             <Icon name={planIcon} />
           </div>
           <div className="sb-plan-meta">
-            <span className="sb-plan-eyebrow">{usage?.trial ? "Trial" : "Current plan"}</span>
+            <span className="sb-plan-eyebrow">
+              {usage?.cycle === "ANNUAL" ? "Current plan · annual" : usage?.cycle === "MONTHLY" ? "Current plan · monthly" : "Current plan"}
+            </span>
             <span className="sb-plan-name">{planName}</span>
           </div>
         </div>
@@ -137,6 +146,12 @@ export function Sidebar({ theme, onTheme }: SidebarProps) {
         <div className="sb-plan-bar">
           <div className="sb-plan-bar-fill" style={{ width: `${qrLimit == null ? 100 : usagePct}%` }} />
         </div>
+        {overQuota > 0 && (
+          <div className="sb-plan-warning">
+            <Icon name="alert-triangle" />
+            {overQuota} item{overQuota > 1 ? "s" : ""} paused (over limit)
+          </div>
+        )}
 
         {upgradeTarget && (
           <button

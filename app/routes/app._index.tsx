@@ -22,6 +22,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   return {
     shop: { name: shop.name, domain: shop.domain },
     canAttribution: entitlements.attribution,
+    detailedAnalytics: entitlements.detailedAnalytics,
     historyDays: entitlements.historyDays,
     ...data,
   };
@@ -65,8 +66,9 @@ function activityIcon(kind: string) {
 }
 
 export default function Dashboard() {
-  const { shop, counts, kpis, series, activity, recent, canAttribution } = useLoaderData<typeof loader>();
-  const sparkScans = series.map(s => s.scans);
+  const { shop, counts, kpis, series, activity, recent, canAttribution, detailedAnalytics } = useLoaderData<typeof loader>();
+  // The scan timeline is part of detailed analytics (Starter+); Free gets the counter only.
+  const sparkScans = detailedAnalytics ? series.map(s => s.scans) : undefined;
 
   return (
     <>
@@ -87,8 +89,8 @@ export default function Dashboard() {
       <div className="grid grid-4">
         <StatCard accent="blue"   label="QR codes"    value={counts.total}             icon="qr-code"     sub={`${recent.filter(r => r.active).length} active`} />
         <StatCard accent="violet" label="Total scans" value={fmtNum(kpis.totalScans)}  icon="scan"        sub="last 14 days" sparklineData={sparkScans} />
-        <StatCard accent="green"  label={canAttribution ? "Conversions" : "Conversions locked"} value={canAttribution ? fmtNum(kpis.totalConversions) : "Growth"} icon="trending-up" sub="last 14 days" />
-        <StatCard accent="amber"  label="Conv. rate"  value={canAttribution ? fmtPct(kpis.convRate, 2) : "Growth"} icon="zap" sub={`${fmtNum(kpis.uniqueVisitors)} unique`} />
+        <StatCard accent="green"  label="Conversions" value={canAttribution ? fmtNum(kpis.totalConversions) : "Locked"} icon={canAttribution ? "trending-up" : "lock"} sub={canAttribution ? "last 14 days" : "Growth plan"} />
+        <StatCard accent="amber"  label="Conv. rate"  value={canAttribution ? fmtPct(kpis.convRate, 2) : "Locked"} icon={canAttribution ? "zap" : "lock"} sub={!canAttribution ? "Growth plan" : detailedAnalytics ? `${fmtNum(kpis.uniqueVisitors)} unique` : "last 14 days"} />
       </div>
 
       {/* Recent QRs + Activity */}

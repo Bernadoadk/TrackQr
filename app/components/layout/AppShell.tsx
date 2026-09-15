@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Outlet, useLocation, useNavigation } from "react-router";
 import { Sidebar } from "./Sidebar";
+import { PlanNotice } from "./PlanNotice";
 import { ToastProvider } from "../ui/Toast";
 import { TweaksPanel, TweakValues, TWEAK_DEFAULTS } from "../ui/TweaksPanel";
 
@@ -96,6 +97,7 @@ export function AppShell() {
         />
         <main className="tqr-content">
           <div className="tqr-content-inner">
+            {!isCampaignEditor && <PlanNotice />}
             <Outlet />
           </div>
         </main>

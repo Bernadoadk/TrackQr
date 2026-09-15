@@ -2,7 +2,7 @@ import prisma from "../db.server";
 import { z } from "zod";
 import type { Campaign, CampaignStatus, Prisma } from "@prisma/client";
 import { shortSlug, nameToSlug } from "./slug.server";
-import { assertQuota, type ShopWithPlan } from "./plan.server";
+import { assertQuota, assertWithinQuota, type ShopWithPlan } from "./plan.server";
 
 export const CreateCampaignSchema = z.object({
   name: z.string().min(1).max(120),
@@ -53,10 +53,22 @@ export async function saveBlocks(shopId: string, id: string, blocks: unknown[], 
   return prisma.campaign.update({ where: { id }, data });
 }
 
-export async function setCampaignStatus(shopId: string, id: string, status: CampaignStatus) {
+export async function setCampaignStatus(shop: ShopWithPlan, id: string, status: CampaignStatus) {
+  const campaign = await prisma.campaign.findFirst({ where: { id, shopId: shop.id } });
+  if (!campaign) throw new Error("Campaign not found");
   const data: Record<string, unknown> = { status };
-  if (status === "ACTIVE") data.publishedAt = new Date();
+  if (status === "ACTIVE") {
+    // Publishing a campaign beyond the plan quota is blocked (it would be
+    // paused again on the next page load anyway).
+    if (campaign.status !== "ACTIVE") await assertWithinQuota(shop, "campaigns", campaign);
+    data.publishedAt = new Date();
+  }
   return prisma.campaign.update({ where: { id }, data });
+}
+
+/** Used by the public page when a campaign turns out to be beyond the plan quota. */
+export async function pauseCampaignById(id: string) {
+  await prisma.campaign.updateMany({ where: { id, status: "ACTIVE" }, data: { status: "PAUSED" } });
 }
 
 export async function deleteCampaign(shopId: string, id: string) {

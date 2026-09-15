@@ -2,7 +2,7 @@ import type { ActionFunctionArgs } from "react-router";
 import { authenticate } from "../shopify.server";
 import prisma from "../db.server";
 import { getShopByDomain } from "../lib/shop.server";
-import { getBillingAccess, pauseShopPublicSurfaces } from "../lib/plan.server";
+import { enforcePlanQuotas } from "../lib/plan.server";
 
 interface WebhookPayload {
   app_subscription?: {
@@ -54,14 +54,14 @@ export const action = async ({ request }: ActionFunctionArgs) => {
           data: { activeSubscriptionId: null },
         });
       }
-      const freshShop = await prisma.shop.findUnique({
-        where: { id: shopRow.id },
-        include: { activeSubscription: { include: { plan: true } } },
-      });
-      if (freshShop && !(await getBillingAccess(freshShop)).hasAccess) {
-        await pauseShopPublicSurfaces(shopRow.id);
-      }
     }
+    // The effective plan may have changed (upgrade, downgrade, fallback to
+    // Free): pause whatever sits beyond the new quotas.
+    const freshShop = await prisma.shop.findUnique({
+      where: { id: shopRow.id },
+      include: { activeSubscription: { include: { plan: true } } },
+    });
+    if (freshShop) await enforcePlanQuotas(freshShop);
   }
 
   console.log(`[webhook] ${topic} for ${shop} → ${status}`);

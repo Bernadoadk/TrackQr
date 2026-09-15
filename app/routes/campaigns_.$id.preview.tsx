@@ -4,16 +4,22 @@ import { CampaignLandingView } from "./c.$slug";
 
 export const loader = async ({ params }: LoaderFunctionArgs) => {
   if (!params.id) throw new Response("Missing id", { status: 400 });
-  const [{ default: prisma }, { campaignLandingData }] = await Promise.all([
+  const [{ default: prisma }, { campaignLandingData }, { getBillingAccess }] = await Promise.all([
     import("../db.server"),
     import("../lib/campaign-landing.server"),
+    import("../lib/plan.server"),
   ]);
   const campaign = await prisma.campaign.findUnique({
     where: { id: params.id },
-    include: { shop: { include: { activeSubscription: true } } },
+    include: { shop: { include: { activeSubscription: { include: { plan: true } } } } },
   });
   if (!campaign) throw new Response("Not found", { status: 404 });
-  return campaignLandingData(campaign, true);
+  const access = await getBillingAccess(campaign.shop);
+  return campaignLandingData(campaign, {
+    isPreview: true,
+    customDesign: access.plan.customDesign,
+    forcePoweredBy: access.status !== "active",
+  });
 };
 
 export default function PublicCampaignPreview() {

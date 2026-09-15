@@ -1,0 +1,12 @@
+api_version = "2025-10"
+
+# Theme app extension — an "App embed" block merchants enable once in
+# Online Store → Themes → Customize → App embeds. It turns the scan id carried
+# by the QR redirect into a cart attribute so paid orders can be attributed
+# back to the scan (Growth plan feature) for every QR type, not only
+# "Add to cart" links.
+[[extensions]]
+type = "theme"
+name = "TrackQr attribution"
+handle = "trackqr-attribution"
+uid = "afc8719f-23c3-a149-e1a1-cbcb4e1003d96bcf85b5"

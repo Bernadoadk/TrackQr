@@ -1,8 +1,8 @@
 import type { LoaderFunctionArgs } from "react-router";
 import { deactivateQrById, getQrBySlug } from "../lib/qr-crud.server";
-import { buildRedirectTarget } from "../lib/qr.server";
+import { buildRedirectTarget, withScanAttribution } from "../lib/qr.server";
 import { parseRequest, recordScan } from "../lib/tracking.server";
-import { isShopAccessActive, pauseShopPublicSurfaces } from "../lib/plan.server";
+import { isOverQuota, resolvePlan } from "../lib/plan.server";
 
 /**
  * Public scan endpoint. Every TrackQr QR encodes a URL pointing here.
@@ -18,12 +18,15 @@ export const loader = async ({ params, request }: LoaderFunctionArgs) => {
   if (!qr || qr.archivedAt) {
     return errorPage("This QR code has been removed.", 410);
   }
-  if (!(await isShopAccessActive(qr.shop))) {
-    await pauseShopPublicSurfaces(qr.shopId);
-    return errorPage("This QR code is unavailable until the merchant reactivates TrackQr billing.", 402);
-  }
   if (!qr.active) {
     return errorPage("This QR code is currently paused.", 423);
+  }
+  // Plan quota gate — a QR code beyond the store's plan limit (e.g. after a
+  // downgrade to Free) is paused here even if no admin page was opened since.
+  const plan = await resolvePlan(qr.shop);
+  if (await isOverQuota("qrCodes", qr, plan.qrCodeLimit)) {
+    await deactivateQrById(qr.id);
+    return errorPage("This QR code is paused — the store's TrackQr plan limit was reached.", 423);
   }
   // Lifecycle gates — scheduled activation and auto-expiration.
   const now = new Date();
@@ -54,19 +57,9 @@ export const loader = async ({ params, request }: LoaderFunctionArgs) => {
     });
   }
 
-  let target = dispatch.url;
-  // For Shopify checkout attribution: append cart attributes the merchant
-  // can read in the order webhook. Only attach for real http(s) URLs.
-  if (scanId && /^https?:\/\//i.test(target)) {
-    try {
-      const u = new URL(target);
-      u.searchParams.set("attributes[tqr_scan]", scanId);
-      u.searchParams.set("attributes[tqr_qr]",   qr.slug);
-      target = u.toString();
-    } catch {
-      // ignore
-    }
-  }
+  // For Shopify order attribution: carry the scan id to the storefront
+  // (cart attributes / app embed). Only for real http(s) URLs.
+  const target = scanId ? withScanAttribution(dispatch.url, scanId, qr.slug) : dispatch.url;
 
   const headers = new Headers({ Location: target });
   if (parsed.setCookie) headers.append("Set-Cookie", parsed.setCookie);

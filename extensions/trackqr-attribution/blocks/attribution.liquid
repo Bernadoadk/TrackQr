@@ -1,0 +1,16 @@
+{%- comment -%}
+  TrackQr attribution — app embed.
+  Loads a tiny script that copies the scan id from the landing URL
+  (?attributes[tqr_scan]=… or ?tqr_scan=…) into the cart attributes, so the
+  order created from that cart carries `tqr_scan` / `tqr_qr` in its
+  note_attributes and TrackQr can attribute the sale to the scan.
+{%- endcomment -%}
+<script src="{{ 'trackqr-attribution.js' | asset_url }}" defer></script>
+
+{% schema %}
+{
+  "name": "TrackQr attribution",
+  "target": "body",
+  "settings": []
+}
+{% endschema %}

@@ -1,5 +1,5 @@
 import type { LoaderFunctionArgs } from "react-router";
-import { deactivateQrById, getQrBySlug } from "../lib/qr-crud.server";
+import { deactivateQrById, getQrBySlug, pauseQrForQuota } from "../lib/qr-crud.server";
 import { buildRedirectTarget, withScanAttribution } from "../lib/qr.server";
 import { parseRequest, recordScan } from "../lib/tracking.server";
 import { isOverQuota, resolvePlan } from "../lib/plan.server";
@@ -25,7 +25,7 @@ export const loader = async ({ params, request }: LoaderFunctionArgs) => {
   // downgrade to Free) is paused here even if no admin page was opened since.
   const plan = await resolvePlan(qr.shop);
   if (await isOverQuota("qrCodes", qr, plan.qrCodeLimit)) {
-    await deactivateQrById(qr.id);
+    await pauseQrForQuota(qr.id);
     return errorPage("This QR code is paused — the store's TrackQr plan limit was reached.", 423);
   }
   // Lifecycle gates — scheduled activation and auto-expiration.

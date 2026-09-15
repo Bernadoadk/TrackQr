@@ -30,7 +30,7 @@ export function PlanNotice() {
           {usage.qrLimit != null ? ` ${usage.qrLimit} QR codes` : ""}
           {usage.qrLimit != null && usage.campaignLimit != null ? " and" : ""}
           {usage.campaignLimit != null ? ` ${usage.campaignLimit} campaign${usage.campaignLimit > 1 ? "s" : ""}` : ""}.
-          Archive or delete older items to make room, or upgrade to reactivate everything.
+          They come back automatically once they fit again — archive or delete older items to make room, or upgrade.
         </div>
         <Link to={pricingHref} className="plan-notice-cta">Upgrade <Icon name="arrow-right" size={12} /></Link>
       </div>

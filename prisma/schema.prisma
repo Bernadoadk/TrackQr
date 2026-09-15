@@ -170,6 +170,9 @@ model QrCode {
   utmMedium     String?
   utmTerm       String?
   active        Boolean  @default(true)
+  // Set when the plan quota (not the merchant) paused this code; cleared on
+  // any manual toggle. Lets an upgrade / freed-up quota reactivate it.
+  quotaPausedAt DateTime?
   // Scheduled activation / auto-expiration (nullable = always-on once active).
   activatesAt   DateTime?
   expiresAt     DateTime?
@@ -274,6 +277,8 @@ model Campaign {
   name          String
   description   String?
   status        CampaignStatus @default(DRAFT)
+  // Set when the plan quota paused this campaign (see QrCode.quotaPausedAt).
+  quotaPausedAt DateTime?
   // Block array: [{ id, type, props, layout, visibility }]
   blocks        Json     @default("[]")
   settings      Json     @default("{}")

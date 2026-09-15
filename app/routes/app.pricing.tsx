@@ -154,7 +154,7 @@ const PLAN_META: Record<string, { icon: string; accent: string; tagline: string;
 
 const FAQS = [
   { q: "Is the Free plan really free?", a: "Yes. The Free plan needs no subscription and never expires: 3 dynamic QR codes, 1 campaign page, a scan counter and PNG downloads in the standard style. Every store starts on it." },
-  { q: "What happens to my QR codes if I downgrade or cancel?", a: "Nothing is deleted. QR codes and campaigns beyond the new plan limits are paused automatically (the oldest ones stay active). Archive or delete items to make room, or upgrade again to reactivate everything. Codes designed with a logo or colors are shown in the standard style on the Free plan and get their design back when you upgrade." },
+  { q: "What happens to my QR codes if I downgrade or cancel?", a: "Nothing is deleted. QR codes and campaigns beyond the new plan limits are paused automatically (the oldest ones stay active) and come back by themselves as soon as they fit again — after you archive or delete older items, or when you upgrade. Codes designed with a logo or colors are shown in the standard style on the Free plan and get their design back when you upgrade." },
   { q: "Can I change plans later?", a: "Yes. Upgrade or downgrade at any time — Shopify applies the change immediately and prorates the difference." },
   { q: "Are taxes included?", a: "Displayed prices exclude taxes. Shopify adds applicable taxes during checkout based on the store's billing location." },
 ];

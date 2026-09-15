@@ -111,35 +111,74 @@ export async function isOverQuota(
 export interface QuotaEnforcement {
   qrCodes: QuotaState;
   campaigns: QuotaState;
+  /** Items paused earlier for quota reasons that fit again and were reactivated. */
+  reactivated: { qrCodes: number; campaigns: number };
+}
+
+/** Ids of items within the plan limit that were paused by a previous quota enforcement. */
+async function quotaPausedWithinLimit(shopId: string, resource: QuotaResource, limit: number | null): Promise<string[]> {
+  const rows = resource === "qrCodes"
+    ? await prisma.qrCode.findMany({
+        where: { shopId, archivedAt: null },
+        orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+        select: { id: true, quotaPausedAt: true },
+        ...(limit == null ? {} : { take: limit }),
+      })
+    : await prisma.campaign.findMany({
+        where: { shopId },
+        orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+        select: { id: true, quotaPausedAt: true },
+        ...(limit == null ? {} : { take: limit }),
+      });
+  return rows.filter(r => r.quotaPausedAt).map(r => r.id);
 }
 
 /**
- * Pause every QR code / campaign beyond the plan limits. Called on each
- * admin page load and after every subscription change, so a downgrade
- * (cancellation, plan switch) takes effect without a cron job.
+ * Apply the plan limits, both ways:
+ *   - pause every QR code / campaign beyond the limits (newest first) and
+ *     remember it was the quota, not the merchant, that paused them;
+ *   - reactivate quota-paused items that fit again (after an upgrade, or once
+ *     older items were archived / deleted). A manual pause is never undone.
+ * Called on each admin page load and after every subscription change, so a
+ * downgrade or an upgrade takes effect without a cron job.
  */
 export async function enforceQuotasForPlan(shopId: string, plan: Plan): Promise<QuotaEnforcement> {
-  const [qrCodes, campaigns] = await Promise.all([
+  const [qrCodes, campaigns, qrBack, campaignsBack] = await Promise.all([
     getQuotaState(shopId, "qrCodes", plan.qrCodeLimit),
     getQuotaState(shopId, "campaigns", plan.campaignLimit),
+    quotaPausedWithinLimit(shopId, "qrCodes", plan.qrCodeLimit),
+    quotaPausedWithinLimit(shopId, "campaigns", plan.campaignLimit),
   ]);
 
+  const now = new Date();
   const ops = [];
   if (qrCodes.overQuotaIds.length) {
     ops.push(prisma.qrCode.updateMany({
       where: { id: { in: qrCodes.overQuotaIds }, active: true },
-      data: { active: false },
+      data: { active: false, quotaPausedAt: now },
     }));
   }
   if (campaigns.overQuotaIds.length) {
     ops.push(prisma.campaign.updateMany({
       where: { id: { in: campaigns.overQuotaIds }, status: "ACTIVE" },
-      data: { status: "PAUSED" },
+      data: { status: "PAUSED", quotaPausedAt: now },
+    }));
+  }
+  if (qrBack.length) {
+    ops.push(prisma.qrCode.updateMany({
+      where: { id: { in: qrBack } },
+      data: { active: true, quotaPausedAt: null },
+    }));
+  }
+  if (campaignsBack.length) {
+    ops.push(prisma.campaign.updateMany({
+      where: { id: { in: campaignsBack }, status: "PAUSED" },
+      data: { status: "ACTIVE", quotaPausedAt: null },
     }));
   }
   if (ops.length) await prisma.$transaction(ops);
 
-  return { qrCodes, campaigns };
+  return { qrCodes, campaigns, reactivated: { qrCodes: qrBack.length, campaigns: campaignsBack.length } };
 }
 
 export async function enforcePlanQuotas(shop: ShopWithPlan): Promise<QuotaEnforcement> {

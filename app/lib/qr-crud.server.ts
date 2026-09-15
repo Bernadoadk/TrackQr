@@ -182,6 +182,7 @@ export async function updateQr(shop: ShopWithPlan, id: string, input: Partial<Cr
   if (input.activate !== undefined) {
     if (input.activate && !qr.active) await assertWithinQuota(shop, "qrCodes", qr);
     next.active = !!input.activate;
+    next.quotaPausedAt = null; // a merchant decision replaces any quota pause
   }
 
   return prisma.qrCode.update({ where: { id }, data: next });
@@ -191,7 +192,8 @@ export async function setActive(shop: ShopWithPlan, id: string, active: boolean)
   const qr = await prisma.qrCode.findFirst({ where: { id, shopId: shop.id } });
   if (!qr) throw new Error("QR code not found");
   if (active) await assertWithinQuota(shop, "qrCodes", qr);
-  await prisma.qrCode.update({ where: { id }, data: { active } });
+  // A merchant decision replaces any quota pause.
+  await prisma.qrCode.update({ where: { id }, data: { active, quotaPausedAt: null } });
 }
 
 export async function deactivateExpiredQrs(shopId: string) {
@@ -213,10 +215,18 @@ export async function deactivateQrById(id: string) {
   });
 }
 
+/** Used by the public scan route when a code turns out to be beyond the plan quota. */
+export async function pauseQrForQuota(id: string) {
+  await prisma.qrCode.update({
+    where: { id },
+    data: { active: false, quotaPausedAt: new Date() },
+  });
+}
+
 export async function archiveQr(shopId: string, id: string) {
   await prisma.qrCode.update({
     where: { id },
-    data: { archivedAt: new Date(), active: false },
+    data: { archivedAt: new Date(), active: false, quotaPausedAt: null },
   });
 }
 

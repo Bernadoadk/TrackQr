@@ -19,7 +19,7 @@ type CampaignLandingData = {
 
 export const loader = async ({ request, params }: LoaderFunctionArgs) => {
   if (!params.slug) throw new Response("Not found", { status: 404 });
-  const { getCampaignBySlug, pauseCampaignById } = await import("../lib/campaign.server");
+  const { getCampaignBySlug, pauseCampaignForQuota } = await import("../lib/campaign.server");
   const { getBillingAccess, isOverQuota } = await import("../lib/plan.server");
   const campaign = await getCampaignBySlug(params.slug);
   if (!campaign) throw new Response("Not found", { status: 404 });
@@ -31,7 +31,7 @@ export const loader = async ({ request, params }: LoaderFunctionArgs) => {
   // Plan quota gate — a campaign beyond the store's plan limit is paused here
   // even if no admin page was opened since the downgrade.
   if (!canPreview && await isOverQuota("campaigns", campaign, access.plan.campaignLimit)) {
-    await pauseCampaignById(campaign.id);
+    await pauseCampaignForQuota(campaign.id);
     throw new Response("This campaign is paused — the store's TrackQr plan limit was reached.", { status: 423 });
   }
   if (campaign.status === "DRAFT" && !canPreview) {
@@ -75,8 +75,8 @@ export const action = async ({ request, params }: ActionFunctionArgs) => {
   const { isOverQuota, resolvePlan } = await import("../lib/plan.server");
   const plan = await resolvePlan(campaign.shop);
   if (await isOverQuota("campaigns", campaign, plan.campaignLimit)) {
-    const { pauseCampaignById } = await import("../lib/campaign.server");
-    await pauseCampaignById(campaign.id);
+    const { pauseCampaignForQuota } = await import("../lib/campaign.server");
+    await pauseCampaignForQuota(campaign.id);
     return { ok: false, error: "inactive" } as const;
   }
 

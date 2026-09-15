@@ -56,7 +56,8 @@ export async function saveBlocks(shopId: string, id: string, blocks: unknown[], 
 export async function setCampaignStatus(shop: ShopWithPlan, id: string, status: CampaignStatus) {
   const campaign = await prisma.campaign.findFirst({ where: { id, shopId: shop.id } });
   if (!campaign) throw new Error("Campaign not found");
-  const data: Record<string, unknown> = { status };
+  // A merchant decision replaces any quota pause.
+  const data: Record<string, unknown> = { status, quotaPausedAt: null };
   if (status === "ACTIVE") {
     // Publishing a campaign beyond the plan quota is blocked (it would be
     // paused again on the next page load anyway).
@@ -67,8 +68,8 @@ export async function setCampaignStatus(shop: ShopWithPlan, id: string, status: 
 }
 
 /** Used by the public page when a campaign turns out to be beyond the plan quota. */
-export async function pauseCampaignById(id: string) {
-  await prisma.campaign.updateMany({ where: { id, status: "ACTIVE" }, data: { status: "PAUSED" } });
+export async function pauseCampaignForQuota(id: string) {
+  await prisma.campaign.updateMany({ where: { id, status: "ACTIVE" }, data: { status: "PAUSED", quotaPausedAt: new Date() } });
 }
 
 export async function deleteCampaign(shopId: string, id: string) {

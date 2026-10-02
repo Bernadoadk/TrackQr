@@ -2,5 +2,8 @@
   "buildCommand": "rm -f .vercel/react-router-build-result.json && npx prisma generate && npx prisma migrate deploy && npx react-router build",
   "installCommand": "npm install",
   "framework": "react-router",
-  "outputDirectory": "build"
+  "outputDirectory": "build",
+  "crons": [
+    { "path": "/api/cron/weekly-report", "schedule": "0 8 * * *" }
+  ]
 }

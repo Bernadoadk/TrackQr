@@ -1,5 +1,7 @@
 import prisma from "../db.server";
-import { resolvePlan, type ShopWithPlan } from "./plan.server";
+import { hasFeature, resolvePlan, type ShopWithPlan } from "./plan.server";
+import { FLOW_TRIGGERS, legacyId, sendFlowTrigger } from "./flow.server";
+import { scanUrl } from "./qr.server";
 
 interface NoteAttribute { name: string; value: string }
 
@@ -63,25 +65,41 @@ export async function attributeOrder(shop: ShopWithPlan, payload: OrderWebhookPa
   const qr = await prisma.qrCode.findUnique({ where: { id: scan.qrCodeId } });
   if (!qr || qr.shopId !== shopId) return;
 
-  // Already attributed? Upsert.
+  // orders/create and orders/paid both land here: update when the order is
+  // already attributed. A scan can lead to several orders (the storefront
+  // keeps the scan id for 7 days), each one is a conversion.
   const orderGid = payload.admin_graphql_api_id ?? `gid://shopify/Order/${payload.id}`;
   const amountStr = payload.total_price_set?.shop_money?.amount ?? payload.total_price ?? "0";
   const cents = Math.round(parseFloat(amountStr) * 100);
   const currency = payload.total_price_set?.shop_money?.currency_code ?? payload.currency ?? payload.presentment_currency ?? null;
+  const data = {
+    orderName: payload.name ?? null,
+    amount: Number.isFinite(cents) ? cents : null,
+    currency,
+  };
 
-  await prisma.conversion.upsert({
-    where: { shopifyOrderId: orderGid },
-    create: {
-      scanId: scan.id,
-      shopifyOrderId: orderGid,
-      orderName: payload.name ?? null,
-      amount: Number.isFinite(cents) ? cents : null,
-      currency,
-    },
-    update: {
-      orderName: payload.name ?? null,
-      amount: Number.isFinite(cents) ? cents : null,
-      currency,
-    },
-  });
+  const existing = await prisma.conversion.findUnique({ where: { shopifyOrderId: orderGid }, select: { id: true } });
+  if (existing) {
+    await prisma.conversion.update({ where: { id: existing.id }, data });
+    return;
+  }
+  try {
+    await prisma.conversion.create({ data: { scanId: scan.id, shopifyOrderId: orderGid, ...data } });
+  } catch (err) {
+    // Both order webhooks raced: the other one created it first.
+    if (typeof err === "object" && err && "code" in err && (err as { code: string }).code === "P2002") return;
+    throw err;
+  }
+
+  if (hasFeature(plan, "automations")) {
+    const orderId = legacyId(orderGid);
+    if (orderId) {
+      await sendFlowTrigger(shop.domain, FLOW_TRIGGERS.orderAttributed, {
+        order_id: orderId,
+        "QR code name": qr.name,
+        "QR code link": scanUrl(qr.slug),
+        "Order amount": Number.isFinite(cents) ? cents / 100 : 0,
+      });
+    }
+  }
 }

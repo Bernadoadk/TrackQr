@@ -3,6 +3,7 @@ import { z } from "zod";
 import type { Campaign, CampaignStatus, Prisma } from "@prisma/client";
 import { shortSlug, nameToSlug } from "./slug.server";
 import { assertQuota, assertWithinQuota, type ShopWithPlan } from "./plan.server";
+import { getQrStats } from "./analytics.server";
 
 export const CreateCampaignSchema = z.object({
   name: z.string().min(1).max(120),
@@ -42,9 +43,15 @@ export async function createCampaign(shop: ShopWithPlan, input: CreateCampaignIn
   throw new Error("Could not create campaign");
 }
 
+const MAX_BLOCKS = 60;
+const MAX_BLOCKS_BYTES = 400_000;
+
 export async function saveBlocks(shopId: string, id: string, blocks: unknown[], name?: string, settings?: unknown) {
   const campaign = await prisma.campaign.findFirst({ where: { id, shopId } });
   if (!campaign) throw new Error("Campaign not found");
+  if (!Array.isArray(blocks)) throw new Error("Invalid blocks");
+  if (blocks.length > MAX_BLOCKS) throw new Error(`A campaign page can hold up to ${MAX_BLOCKS} blocks.`);
+  if (JSON.stringify(blocks).length > MAX_BLOCKS_BYTES) throw new Error("This page is too large — remove a few blocks or images.");
   const data: Prisma.CampaignUpdateInput = { blocks: blocks as Prisma.InputJsonValue };
   if (typeof name === "string" && name.trim()) data.name = name.trim();
   if (settings && typeof settings === "object" && !Array.isArray(settings)) {
@@ -53,7 +60,10 @@ export async function saveBlocks(shopId: string, id: string, blocks: unknown[], 
   return prisma.campaign.update({ where: { id }, data });
 }
 
+const CAMPAIGN_STATUSES: CampaignStatus[] = ["DRAFT", "ACTIVE", "PAUSED", "ENDED"];
+
 export async function setCampaignStatus(shop: ShopWithPlan, id: string, status: CampaignStatus) {
+  if (!CAMPAIGN_STATUSES.includes(status)) throw new Error("Unknown campaign status");
   const campaign = await prisma.campaign.findFirst({ where: { id, shopId: shop.id } });
   if (!campaign) throw new Error("Campaign not found");
   // A merchant decision replaces any quota pause.
@@ -67,13 +77,50 @@ export async function setCampaignStatus(shop: ShopWithPlan, id: string, status: 
   return prisma.campaign.update({ where: { id }, data });
 }
 
+export type CampaignPublicState = "live" | "draft" | "paused" | "scheduled" | "ended";
+
+/**
+ * What the public page should do right now, taking the merchant's start /
+ * end dates into account (a published campaign with a future start date
+ * stays hidden until then; past its end date it is ended).
+ */
+export function campaignPublicState(
+  campaign: Pick<Campaign, "status" | "startAt" | "endAt">,
+  now = new Date(),
+): CampaignPublicState {
+  if (campaign.status === "DRAFT") return "draft";
+  if (campaign.status === "PAUSED") return "paused";
+  if (campaign.status === "ENDED") return "ended";
+  if (campaign.endAt && campaign.endAt <= now) return "ended";
+  if (campaign.startAt && campaign.startAt > now) return "scheduled";
+  return "live";
+}
+
+/** Persist the end of a campaign whose end date has passed. */
+export async function endCampaignIfExpired(campaign: Pick<Campaign, "id" | "status" | "endAt">) {
+  if (campaign.status === "ACTIVE" && campaign.endAt && campaign.endAt <= new Date()) {
+    await prisma.campaign.updateMany({ where: { id: campaign.id, status: "ACTIVE" }, data: { status: "ENDED" } });
+  }
+}
+
 /** Used by the public page when a campaign turns out to be beyond the plan quota. */
 export async function pauseCampaignForQuota(id: string) {
   await prisma.campaign.updateMany({ where: { id, status: "ACTIVE" }, data: { status: "PAUSED", quotaPausedAt: new Date() } });
 }
 
+/** Hard delete (cascades leads / views) — scoped to the shop. */
 export async function deleteCampaign(shopId: string, id: string) {
-  await prisma.campaign.delete({ where: { id } });
+  const { count } = await prisma.campaign.deleteMany({ where: { id, shopId } });
+  if (!count) throw new Error("Campaign not found");
+}
+
+/** One row per human visit of a public campaign page (not previews). */
+export async function recordCampaignView(campaignId: string, sessionToken: string | null) {
+  try {
+    await prisma.campaignView.create({ data: { campaignId, sessionToken } });
+  } catch (err) {
+    console.error("[campaign] recordCampaignView failed", err);
+  }
 }
 
 export async function duplicateCampaign(shop: ShopWithPlan, id: string) {
@@ -105,8 +152,13 @@ export interface CampaignListItem {
   endAt: Date | null;
   createdAt: Date;
   scans: number;
+  views: number;
   leads: number;
+  /** Leads / page views, in percent. */
+  signupRate: number;
   conversions: number;
+  /** Attributed revenue in cents. */
+  revenue: number;
   convRate: number;
 }
 
@@ -116,24 +168,34 @@ export interface CampaignListAccess {
 }
 
 export async function listCampaigns(shopId: string, access: CampaignListAccess = {}): Promise<CampaignListItem[]> {
+  const since = access.earliestScanDate ?? new Date(0);
   const rows = await prisma.campaign.findMany({
     where: { shopId },
     orderBy: { createdAt: "desc" },
     include: {
-      qrCode: {
-        select: {
-          scans: {
-            where: access.earliestScanDate ? { createdAt: { gte: access.earliestScanDate } } : undefined,
-            select: { id: true, conversion: { select: { id: true } } },
-          },
-        },
-      },
+      qrCode: { select: { id: true } },
       _count: { select: { leads: true } },
     },
   });
+  const campaignIds = rows.map(c => c.id);
+  const qrIds = rows.map(c => c.qrCode?.id).filter((id): id is string => !!id);
+  const [qrStats, viewRows] = await Promise.all([
+    getQrStats(shopId, qrIds, { earliestScanDate: access.earliestScanDate ?? null, attribution: access.attribution !== false }),
+    campaignIds.length
+      ? prisma.campaignView.groupBy({
+          by: ["campaignId"],
+          where: { campaignId: { in: campaignIds }, createdAt: { gte: since } },
+          _count: { _all: true },
+        })
+      : Promise.resolve([]),
+  ]);
+  const views = new Map(viewRows.map(r => [r.campaignId, r._count._all]));
+
   return rows.map(c => {
-    const scans = c.qrCode?.scans.length ?? 0;
-    const conversions = access.attribution === false ? 0 : c.qrCode?.scans.filter(s => s.conversion).length ?? 0;
+    const stats = c.qrCode ? qrStats.get(c.qrCode.id) : undefined;
+    const scans = stats?.scans ?? 0;
+    const conversions = access.attribution === false ? 0 : stats?.conversions ?? 0;
+    const pageViews = views.get(c.id) ?? 0;
     return {
       id: c.id,
       slug: c.slug,
@@ -144,8 +206,11 @@ export async function listCampaigns(shopId: string, access: CampaignListAccess =
       endAt: c.endAt,
       createdAt: c.createdAt,
       scans,
+      views: pageViews,
       leads: c._count.leads,
+      signupRate: pageViews > 0 ? (c._count.leads / pageViews) * 100 : 0,
       conversions,
+      revenue: access.attribution === false ? 0 : stats?.revenue ?? 0,
       convRate: scans > 0 ? (conversions / scans) * 100 : 0,
     };
   });

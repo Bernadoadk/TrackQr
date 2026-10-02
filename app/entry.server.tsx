@@ -5,6 +5,7 @@ import { createReadableStreamFromReadable } from "@react-router/node";
 import { type EntryContext } from "react-router";
 import { isbot } from "isbot";
 import { addDocumentResponseHeaders } from "./shopify.server";
+import { runWithLocale } from "./lib/i18n.server";
 
 export const streamTimeout = 5000;
 
@@ -20,7 +21,10 @@ export default async function handleRequest(
     ? "onAllReady"
     : "onShellReady";
 
-  return new Promise((resolve, reject) => {
+  // Admin pages render in the merchant's language (t() reads it during SSR).
+  const appData = reactRouterContext.staticHandlerContext.loaderData["routes/app"] as { locale?: unknown } | undefined;
+
+  return runWithLocale(appData?.locale, () => new Promise((resolve, reject) => {
     const { pipe, abort } = renderToPipeableStream(
       <ServerRouter
         context={reactRouterContext}
@@ -53,5 +57,5 @@ export default async function handleRequest(
     // Automatically timeout the React renderer after 6 seconds, which ensures
     // React has enough time to flush down the rejected boundary contents
     setTimeout(abort, streamTimeout + 1000);
-  });
+  }));
 }

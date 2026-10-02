@@ -1,5 +1,6 @@
 import net from "node:net";
 import tls from "node:tls";
+import { t } from "./i18n";
 
 type MailInput = {
   to: string;
@@ -38,6 +39,10 @@ function smtpConfig(): SmtpConfig | null {
     fromEmail: process.env.SMTP_FROM_EMAIL?.trim() || user,
     fromName: process.env.SMTP_FROM_NAME?.trim() || "TrackQr",
   };
+}
+
+export function isSmtpConfigured(): boolean {
+  return smtpConfig() !== null;
 }
 
 function cleanHeader(value: string) {
@@ -102,10 +107,18 @@ async function command(socket: net.Socket | tls.TLSSocket, line: string, ok: num
   return response;
 }
 
+const SOCKET_TIMEOUT_MS = 15_000;
+
+/** Never let a silent SMTP server hang the request that sends the mail. */
+function guard<T extends net.Socket | tls.TLSSocket>(socket: T): T {
+  socket.setTimeout(SOCKET_TIMEOUT_MS, () => socket.destroy(new Error("SMTP connection timed out")));
+  return socket;
+}
+
 async function connect(config: SmtpConfig) {
-  const socket = config.secure
+  const socket = guard(config.secure
     ? tls.connect(config.port, config.host, { servername: config.host })
-    : net.connect(config.port, config.host);
+    : net.connect(config.port, config.host));
 
   await new Promise<void>((resolve, reject) => {
     socket.once(config.secure ? "secureConnect" : "connect", resolve);
@@ -116,7 +129,7 @@ async function connect(config: SmtpConfig) {
   if (!config.secure) {
     await command(socket, `EHLO ${config.host}`, 250);
     await command(socket, "STARTTLS", 220);
-    const secureSocket = tls.connect({ socket, servername: config.host });
+    const secureSocket = guard(tls.connect({ socket, servername: config.host }));
     await new Promise<void>((resolve, reject) => {
       secureSocket.once("secureConnect", resolve);
       secureSocket.once("error", reject);
@@ -164,6 +177,7 @@ export async function sendSmtpMail(input: MailInput) {
   }
 }
 
+/** Lead alert for the merchant — call it inside runWithLocale() to get their language. */
 export function leadNotificationHtml(input: {
   campaignName: string;
   customerEmail: string;
@@ -177,11 +191,11 @@ export function leadNotificationHtml(input: {
 
   return `
     <div style="font-family:Inter,Arial,sans-serif;color:#111827;line-height:1.5">
-      <h2 style="margin:0 0 12px">New campaign lead</h2>
-      <p style="margin:0 0 16px">A visitor submitted the campaign <strong>${escapeHtml(input.campaignName)}</strong>.</p>
+      <h2 style="margin:0 0 12px">${escapeHtml(t("New campaign lead"))}</h2>
+      <p style="margin:0 0 16px">${escapeHtml(t("A visitor submitted the campaign {name}.", { name: "\u0000" })).replace("\u0000", `<strong>${escapeHtml(input.campaignName)}</strong>`)}</p>
       <table style="border-collapse:collapse;width:100%;max-width:560px">
-        <tr><td style="padding:8px;border:1px solid #e5e7eb">Customer email</td><td style="padding:8px;border:1px solid #e5e7eb">${escapeHtml(input.customerEmail)}</td></tr>
-        ${input.shopDomain ? `<tr><td style="padding:8px;border:1px solid #e5e7eb">Shop</td><td style="padding:8px;border:1px solid #e5e7eb">${escapeHtml(input.shopDomain)}</td></tr>` : ""}
+        <tr><td style="padding:8px;border:1px solid #e5e7eb">${escapeHtml(t("Customer email"))}</td><td style="padding:8px;border:1px solid #e5e7eb">${escapeHtml(input.customerEmail)}</td></tr>
+        ${input.shopDomain ? `<tr><td style="padding:8px;border:1px solid #e5e7eb">${escapeHtml(t("Shop"))}</td><td style="padding:8px;border:1px solid #e5e7eb">${escapeHtml(input.shopDomain)}</td></tr>` : ""}
         ${rows}
       </table>
     </div>

@@ -2,6 +2,9 @@ import type { Campaign, Shop } from "@prisma/client";
 import prisma from "../db.server";
 import { campaignPageSettingsForPlan } from "./campaign-settings";
 import { applyDesignEntitlement } from "./qr-standard";
+import { scanUrl } from "./qr.server";
+import { storeHosts } from "./shop-settings.server";
+import type { CampaignLang } from "./campaign-copy";
 
 type CampaignBlock = {
   id: string;
@@ -17,6 +20,22 @@ export interface CampaignLandingOptions {
   customDesign: boolean;
   /** Free-plan stores always show the "Powered by TrackQr" watermark. */
   forcePoweredBy: boolean;
+  /** GA4 / Meta Pixel on the page (Growth). */
+  pixels: boolean;
+  /** Unique discount rewards on capture blocks (Growth). */
+  rewards: boolean;
+  /** Scan that led to this visit — appended to store links for attribution. */
+  attribution?: { scanId: string; qrSlug: string } | null;
+  /** Visitor language for the page's interface text (buttons, form messages…). */
+  lang?: CampaignLang;
+}
+
+/** Keep only well-formed scan ids / slugs coming back from the URL. */
+export function parseAttributionParams(url: URL): { scanId: string; qrSlug: string } | null {
+  const scanId = url.searchParams.get("tqr_scan") ?? "";
+  const qrSlug = url.searchParams.get("tqr_qr") ?? "";
+  if (!/^[a-z0-9]{20,40}$/i.test(scanId) || !/^[A-Za-z0-9]{4,12}$/.test(qrSlug)) return null;
+  return { scanId, qrSlug };
 }
 
 export async function campaignLandingData(campaign: Campaign & { shop: Shop }, opts: CampaignLandingOptions) {
@@ -28,23 +47,26 @@ export async function campaignLandingData(campaign: Campaign & { shop: Shop }, o
         select: { id: true, name: true, slug: true, design: true, label: true },
       })
     : [];
-  const appUrl = (process.env.SHOPIFY_APP_URL ?? "").replace(/\/$/, "");
 
   return {
     name: campaign.name,
     slug: campaign.slug,
     isPreview: opts.isPreview ?? false,
+    lang: opts.lang ?? "en",
     status: campaign.status,
     shopDomain: campaign.shop.domain,
-    settings: campaignPageSettingsForPlan(campaign.settings, opts.forcePoweredBy),
+    storeHosts: storeHosts(campaign.shop),
+    attribution: opts.attribution ?? null,
+    rewardsEnabled: opts.rewards,
+    settings: campaignPageSettingsForPlan(campaign.settings, { forcePoweredBy: opts.forcePoweredBy, pixels: opts.pixels }),
     blocks,
+    // Keyed by the block's QR choice. Only what the page renders is exposed
+    // (no internal ids beyond the block reference).
     qrById: Object.fromEntries(qrRows.map(q => {
       const appearance = applyDesignEntitlement(opts.customDesign, q.design, q.label);
       return [q.id, {
-        id: q.id,
         name: q.name,
-        slug: q.slug,
-        scanUrl: appUrl ? `${appUrl}/s/${q.slug}` : `/s/${q.slug}`,
+        scanUrl: scanUrl(q.slug),
         design: appearance.design,
         label: appearance.label,
       }];

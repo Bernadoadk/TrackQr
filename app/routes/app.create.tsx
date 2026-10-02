@@ -3,16 +3,21 @@ import { useEffect, useRef, useState } from "react";
 import { useNavigate, useFetcher, useLoaderData } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { useAppBridge } from "@shopify/app-bridge-react";
-import { authenticate } from "../shopify.server";
+import prisma from "../db.server";
 import { requireShop } from "../lib/shop.server";
 import { createQr, getQrForEdit, updateQr } from "../lib/qr-crud.server";
 import { listTemplates, createTemplate, deleteTemplate } from "../lib/templates.server";
-import { listCampaigns } from "../lib/campaign.server";
 import { createDiscountCode } from "../lib/discounts.server";
+import { scanBaseUrl } from "../lib/qr.server";
+import { readShopSettings } from "../lib/shop-settings.server";
+import { normalizeRoutingConfig, type RoutingConfig } from "../lib/routing";
+import { parseWifiPayload as parseWifi, wifiPayload as buildWifi } from "../lib/wifi";
+import { STORE_QR_TYPES, QR_TYPE_FROM_UI, QR_TYPE_TO_UI } from "../lib/qr-types";
+import { SmartRoutingCard } from "../components/qr/SmartRoutingCard";
+import { RangeSlider } from "../components/ui/RangeSlider";
 import { FeatureLockedError, getPlanEntitlements, QuotaExceededError, requireFeature } from "../lib/plan.server";
 import { featureMinPlanLabel } from "../lib/plan.constants";
 import { STANDARD_DESIGN, STANDARD_LABEL_FORMAT } from "../lib/qr-standard";
-import { QR_TYPE_TO_UI } from "../lib/qr-types";
 import { Icon } from "../components/ui/Icon";
 import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
@@ -27,17 +32,17 @@ import { LogoPicker, logoSvgDataUrl, type LogoSelection } from "../components/ui
 import { LABEL_FONTS, LABEL_FONT_GROUPS, DEFAULT_FONT, getLabelFont } from "../lib/label-fonts";
 import { contrastRatio, contrastVerdict } from "../lib/contrast";
 import { downloadQrAsset, type DownloadFormat } from "../lib/qr-download";
+import { t, tem, tm } from "../lib/i18n";
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
-  await authenticate.admin(request);
   const { shop } = await requireShop(request);
   const url = new URL(request.url);
   const editId = url.searchParams.get("edit");
-  const origin = (process.env.SHOPIFY_APP_URL ?? url.origin).replace(/\/$/, "");
+  const origin = scanBaseUrl() || url.origin;
   // Load templates + active campaigns once for the page (cheap queries).
   const [templates, campaigns, editQr, entitlements] = await Promise.all([
     listTemplates(shop.id),
-    listCampaigns(shop.id),
+    prisma.campaign.findMany({ where: { shopId: shop.id }, orderBy: { createdAt: "desc" }, select: { id: true, name: true, slug: true, status: true } }),
     editId ? getQrForEdit(shop.id, editId) : Promise.resolve(null),
     getPlanEntitlements(shop),
   ]);
@@ -46,13 +51,18 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       name: entitlements.planName,
       customDesign: entitlements.customDesign,
       exports: entitlements.exports,
+      customFallback: entitlements.customFallback,
+      smartRouting: entitlements.smartRouting,
     },
-    templates: templates.map(t => ({
-      id: t.id,
-      name: t.name,
-      design: t.design as Record<string, unknown>,
-      label:  t.label  as Record<string, unknown>,
-      updatedAt: t.updatedAt.toISOString(),
+    shopDomain: shop.domain,
+    timezone: shop.ianaTimezone || "UTC",
+    defaultFallback: entitlements.customFallback ? readShopSettings(shop).defaultFallbackUrl : null,
+    templates: templates.map(tpl => ({
+      id: tpl.id,
+      name: tpl.name,
+      design: tpl.design as Record<string, unknown>,
+      label:  tpl.label  as Record<string, unknown>,
+      updatedAt: tpl.updatedAt.toISOString(),
     })),
     campaigns: campaigns.map(c => ({ id: c.id, name: c.name, slug: c.slug, status: c.status })),
     origin,
@@ -73,6 +83,9 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       activatesAt: editQr.activatesAt?.toISOString() ?? null,
       expiresAt: editQr.expiresAt?.toISOString() ?? null,
       campaignId: editQr.campaignId,
+      fallbackUrl: editQr.fallbackUrl,
+      discountCode: editQr.discountCode,
+      rules: normalizeRoutingConfig(editQr.rules),
       active: editQr.active,
     } : null,
   };
@@ -81,8 +94,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 export const action = async ({ request }: ActionFunctionArgs) => {
   // We need both the shop record (for templates/QR) AND the admin GraphQL
   // client (for optional Shopify discount creation).
-  const { admin } = await authenticate.admin(request);
-  const { shop } = await requireShop(request);
+  const { admin, shop } = await requireShop(request);
   const form = await request.formData();
   const intent = String(form.get("intent") ?? "create");
 
@@ -91,12 +103,12 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     try {
       // Saved design presets belong to the custom-design feature (Starter+).
       await requireFeature(shop, "customDesign", featureMinPlanLabel("customDesign"));
-      const t = await createTemplate(shop.id, {
+      const tpl = await createTemplate(shop.id, {
         name:   String(form.get("name") ?? "Untitled template"),
         design: JSON.parse(String(form.get("design") ?? "{}")),
         label:  JSON.parse(String(form.get("label")  ?? "{}")),
       });
-      return { ok: true as const, intent: "template:save" as const, id: t.id, name: t.name };
+      return { ok: true as const, intent: "template:save" as const, id: tpl.id, name: tpl.name };
     } catch (err) {
       return { ok: false as const, intent: "template:save" as const, message: err instanceof Error ? err.message : "Save failed" };
     }
@@ -110,19 +122,25 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   try {
     const design = JSON.parse(String(form.get("design") ?? "{}"));
     const label = JSON.parse(String(form.get("label") ?? "{}"));
+    // Plan-gated fields are only sent by the form when the plan allows them,
+    // so a downgraded store keeps what it configured before (like designs).
+    const rules = form.has("rules") ? JSON.parse(String(form.get("rules"))) : undefined;
+    const fallbackUrl = form.has("fallbackUrl") ? String(form.get("fallbackUrl") ?? "").trim() || null : undefined;
     const type   = String(form.get("type") ?? "");
     const target = String(form.get("target") ?? "");
+    const discountCode = String(form.get("discountCode") ?? "").trim();
 
     // Opt-in: auto-create the Shopify discount before persisting the QR.
     // Best-effort — if it fails, we still create the QR (the merchant can
     // create the discount manually in admin).
     let discountWarning: string | null = null;
-    if (type === "promo" && form.get("autoCreateDiscount") === "1" && target) {
+    const codeToCreate = type === "promo" ? target.trim().toUpperCase() : discountCode.toUpperCase();
+    if (form.get("autoCreateDiscount") === "1" && codeToCreate) {
       const pct = Math.max(0.05, Math.min(0.50, Number(form.get("discountValuePct") ?? "0.10")));
       const result = await createDiscountCode(admin, {
-        code: target.trim().toUpperCase(),
+        code: codeToCreate,
         percentage: pct,
-        title: `TrackQr · ${target.trim().toUpperCase()}`,
+        title: `TrackQr · ${codeToCreate}`,
       });
       if (!result.ok) discountWarning = result.error;
     }
@@ -142,6 +160,9 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       activatesAt: (form.get("activatesAt") as string | null) || null,
       expiresAt:   (form.get("expiresAt")   as string | null) || null,
       campaignId:  (form.get("campaignId")  as string | null) || null,
+      discountCode: type === "promo" ? null : codeToCreate || null,
+      ...(fallbackUrl !== undefined ? { fallbackUrl } : {}),
+      ...(rules !== undefined ? { rules } : {}),
       activate: form.get("activate") === "1",
     };
 
@@ -182,12 +203,15 @@ type CornerStyle = "square" | "rounded" | "extra-rounded";
 type LabelPos    = "none" | "top" | "bottom" | "left" | "right";
 
 const QR_TYPES = [
-  { id: "home",    name: "Homepage",     icon: "home",           group: "shopify", url: "/" },
-  { id: "product", name: "Product page", icon: "package",        group: "shopify", url: "/products/aurora-tee" },
-  { id: "link",    name: "Link",         icon: "link",           group: "shopify", url: "https://" },
-  { id: "atc",     name: "Add to cart",  icon: "shopping-cart",  group: "shopify", url: "/cart/add" },
-  { id: "promo",   name: "Promo code",   icon: "tag",            group: "shopify", url: "/discount/" },
-  { id: "url",     name: "Custom URL",   icon: "globe",          group: "custom",  url: "https://" },
+  { id: "home",       name: "Homepage",     icon: "home",           group: "shopify", url: "/" },
+  { id: "product",    name: "Product page", icon: "package",        group: "shopify", url: "/products/aurora-tee" },
+  { id: "collection", name: "Collection",   icon: "grid",           group: "shopify", url: "/collections/" },
+  { id: "page",       name: "Store page",   icon: "layout",         group: "shopify", url: "/pages/" },
+  { id: "atc",        name: "Add to cart",  icon: "shopping-cart",  group: "shopify", url: "/cart/add" },
+  { id: "promo",      name: "Promo code",   icon: "tag",            group: "shopify", url: "/discount/" },
+  // Legacy type: kept for existing codes, hidden from the picker (Custom URL / Store page replace it).
+  { id: "link",       name: "Link",         icon: "link",           group: "legacy",  url: "https://" },
+  { id: "url",        name: "Custom URL",   icon: "globe",          group: "custom",  url: "https://" },
   { id: "text",    name: "Text",         icon: "type",           group: "custom" },
   { id: "phone",   name: "Phone",        icon: "phone",          group: "custom" },
   { id: "sms",     name: "SMS",          icon: "message-square", group: "custom" },
@@ -198,7 +222,7 @@ const QR_TYPES = [
 
 type QrTypeId = (typeof QR_TYPES)[number]["id"];
 
-function typeMeta(id: QrTypeId) { return QR_TYPES.find(t => t.id === id) ?? QR_TYPES[0]; }
+function typeMeta(id: QrTypeId) { return QR_TYPES.find(item => item.id === id) ?? QR_TYPES[0]; }
 
 const QR_STYLES: QrStyle[]      = ["square", "rounded", "dot", "classy"];
 const QR_CORNERS: CornerStyle[] = ["square", "rounded", "extra-rounded"];
@@ -407,37 +431,24 @@ function PositionMini({ pos }: { pos: LabelPos }) {
 
 /* ── Encoders for composite QR types (WiFi, vCard) ── */
 
-function wifiPayload(ssid: string, password: string, encryption: "WPA" | "WEP" | "nopass" = "WPA", hidden = false): string {
-  const esc = (s: string) => s.replace(/([\\;,"':])/g, "\\$1");
-  return `WIFI:T:${encryption};S:${esc(ssid)};P:${esc(password)};${hidden ? "H:true;" : ""};`;
-}
+const wifiPayload = buildWifi;
+const parseWifiPayload = parseWifi;
 
 function vcardPayload(o: { fullName: string; title?: string; org?: string; phone?: string; email?: string; url?: string }): string {
+  // One property per line: strip line breaks so a value can't add fields.
+  const v = (s?: string) => (s ?? "").replace(/[\r\n]+/g, " ").trim();
   const lines = [
     "BEGIN:VCARD",
     "VERSION:3.0",
-    `FN:${o.fullName}`,
-    o.org   ? `ORG:${o.org}`         : "",
-    o.title ? `TITLE:${o.title}`     : "",
-    o.phone ? `TEL;TYPE=CELL:${o.phone}` : "",
-    o.email ? `EMAIL:${o.email}`     : "",
-    o.url   ? `URL:${o.url}`         : "",
+    `FN:${v(o.fullName)}`,
+    o.org   ? `ORG:${v(o.org)}`         : "",
+    o.title ? `TITLE:${v(o.title)}`     : "",
+    o.phone ? `TEL;TYPE=CELL:${v(o.phone)}` : "",
+    o.email ? `EMAIL:${v(o.email)}`     : "",
+    o.url   ? `URL:${v(o.url)}`         : "",
     "END:VCARD",
   ];
   return lines.filter(Boolean).join("\n");
-}
-
-function parseWifiPayload(payload: string) {
-  const parts: Record<string, string> = {};
-  payload.replace(/^WIFI:/, "").split(";").forEach(part => {
-    const [key, ...value] = part.split(":");
-    if (key) parts[key] = value.join(":").replace(/\\([\\;,"':])/g, "$1");
-  });
-  return {
-    ssid: parts.S ?? "",
-    password: parts.P ?? "",
-    encryption: (parts.T === "WEP" || parts.T === "nopass" ? parts.T : "WPA") as "WPA" | "WEP" | "nopass",
-  };
 }
 
 function parseVcardPayload(payload: string) {
@@ -456,6 +467,25 @@ function parseVcardPayload(payload: string) {
   };
 }
 
+interface CartItem {
+  /** Numeric variant id (cart permalinks use legacy ids). */
+  variantId: string;
+  title: string;
+  quantity: number;
+}
+
+/** "123:2,456:1" ↔ cart items (titles come from the picker, or a fallback). */
+function parseCartTarget(target: string): CartItem[] {
+  return target.split(",").map(part => {
+    const [id, qty] = part.trim().replace(/^\/?(cart\/)?/, "").split(":");
+    return /^\d+$/.test(id ?? "") ? { variantId: id, title: t("Variant #{id}", { id }), quantity: Math.max(1, Number(qty) || 1) } : null;
+  }).filter((x): x is CartItem => !!x);
+}
+
+function cartTarget(items: CartItem[]): string {
+  return items.map(i => `${i.variantId}:${Math.min(99, Math.max(1, i.quantity))}`).join(",");
+}
+
 function toDatetimeLocal(iso?: string | null) {
   if (!iso) return "";
   const d = new Date(iso);
@@ -472,7 +502,7 @@ export default function CreateQr() {
   const shopify  = useAppBridge();
   const requestReview = useReviewRequest();
   // Loader data — saved templates + active campaigns to attach to.
-  const { templates, campaigns, editQr, origin, plan } = useLoaderData<typeof loader>();
+  const { templates, campaigns, editQr, origin, plan, shopDomain, defaultFallback, timezone } = useLoaderData<typeof loader>();
   const isEditing = !!editQr;
   // Plan gating: without `customDesign` the QR keeps the standard look and
   // only the label text / position can be edited; SVG / PDF need `exports`.
@@ -539,7 +569,18 @@ export default function CreateQr() {
   // Campaign link (Batch C) — optional campaign FK.
   const [campaignId,  setCampaignId]  = useState<string>("");
 
-  // Auto-create Shopify discount (only relevant for type=promo).
+  // Fallback destination while the code can't serve its target (Starter+).
+  const [fallbackUrl, setFallbackUrl] = useState<string>("");
+  // Smart routing rules + A/B split (Growth).
+  const [routing, setRouting] = useState<RoutingConfig>({ rules: [], abTest: null });
+
+  // "Add to cart" can hold several variants with quantities.
+  const [cartItems, setCartItems] = useState<CartItem[]>([]);
+
+  // Discount applied automatically on Shopify destinations (any store type),
+  // and the promo code of the "Promo code" type. Auto-create is opt-in on
+  // other types (the code often already exists in Shopify).
+  const [discountCode, setDiscountCode] = useState<string>("");
   const [autoCreateDiscount, setAutoCreateDiscount] = useState<boolean>(true);
   const [discountValuePct,   setDiscountValuePct]   = useState<number>(10);
 
@@ -548,7 +589,7 @@ export default function CreateQr() {
   const [showTemplateSave, setShowTemplateSave] = useState<boolean>(false);
 
   // Label — text + inline rich-text formatting
-  const [labelText, setLabelText] = useState("Scan to discover");
+  const [labelText, setLabelText] = useState(() => t("Scan to discover"));
   const [labelPos,  setLabelPos]  = useState<LabelPos>("bottom");
   const [frameStyle, setFrameStyle] = useState<FrameStyle>("none");
   const [labelFont,  setLabelFont]  = useState<string>(DEFAULT_FONT);
@@ -611,8 +652,6 @@ export default function CreateQr() {
   }, [labelPos]);
 
   const [activated,    setActivated]    = useState(false);
-  const [generating,   setGenerating]   = useState(false);
-  const [renderToken,  setRenderToken]  = useState(0);
   const [downloading,  setDownloading]  = useState<DownloadFormat | null>(null);
   const [savedQr,      setSavedQr]      = useState<{ id: string; slug: string; name: string } | null>(
     editQr ? { id: editQr.id, slug: editQr.slug, name: editQr.name } : null,
@@ -649,9 +688,17 @@ export default function CreateQr() {
       setVcEmail(vcard.email);
       setVcUrl(vcard.url);
       setTarget("");
+    } else if (editType === "atc") {
+      setCartItems(parseCartTarget(editQr.target ?? ""));
+      setTarget(editQr.target ?? "");
     } else {
       setTarget(editQr.target ?? "");
     }
+    setDiscountCode(editQr.discountCode ?? "");
+    // An existing code is usually already in Shopify — don't recreate it.
+    setAutoCreateDiscount(false);
+    setFallbackUrl(editQr.fallbackUrl ?? "");
+    setRouting(editQr.rules ?? { rules: [], abTest: null });
 
     if (QR_STYLES.includes(d.style as QrStyle)) setStyle(d.style as QrStyle);
     if (QR_CORNERS.includes(d.cornerStyle as CornerStyle)) setCornerStyle(d.cornerStyle as CornerStyle);
@@ -708,20 +755,11 @@ export default function CreateQr() {
   const effectiveTarget = (() => {
     if (type === "wifi")  return wifiSsid ? wifiPayload(wifiSsid, wifiPwd, wifiEnc) : "";
     if (type === "vcard") return vcFull ? vcardPayload({ fullName: vcFull, title: vcTitle, org: vcOrg, phone: vcPhone, email: vcEmail, url: vcUrl }) : "";
+    if (type === "atc")   return cartTarget(cartItems);
     return target;
   })();
+  const isStoreType = STORE_QR_TYPES.includes(QR_TYPE_FROM_UI[type]);
 
-  useEffect(() => {
-    setGenerating(true);
-    const t = setTimeout(() => { setGenerating(false); setRenderToken(k => k + 1); }, 380);
-    return () => clearTimeout(t);
-  }, [
-    style, cornerStyle, fg, bg, logoSel, logoSizePct, qrMargin, cornerColor,
-    gradientOn, gradientFrom, gradientTo, gradientAngle,
-    labelText, labelPos, frameStyle, labelFont, labelFontSize, labelBold, labelItalic, labelUnderline,
-    labelAlign, labelTextColor, labelBgColor,
-    name, type, effectiveTarget, activated,
-  ]);
 
   useEffect(() => {
     if (fetcher.state !== "idle" || !fetcher.data) return;
@@ -731,8 +769,8 @@ export default function CreateQr() {
       setSavedQr({ id: fetcher.data.id, slug: fetcher.data.slug, name: fetcher.data.name || name || fetcher.data.slug });
       setActivated(fetcher.data.active);
       toast({
-        title: submitMode === "activate" ? "QR code activated" : "QR code saved",
-        desc: submitMode === "activate" ? "It is now ready to scan." : "Saved to My QR codes.",
+        title: submitMode === "activate" ? t("QR code activated") : t("QR code saved"),
+        desc: submitMode === "activate" ? t("It is now ready to scan.") : t("Saved to My QR codes."),
       });
       // A QR code going live is a meaningful success — the right moment to
       // let Shopify ask for a review (never on page load).
@@ -742,15 +780,15 @@ export default function CreateQr() {
       if ("discountWarning" in fetcher.data && fetcher.data.discountWarning) {
         toast({
           type: "error",
-          title: "Discount code skipped",
-          desc: fetcher.data.discountWarning,
+          title: t("Discount code skipped"),
+          desc: tm(fetcher.data.discountWarning),
         });
       }
     } else if ("error" in fetcher.data) {
       toast({
         type: "error",
-        title: fetcher.data.error === "quota" ? "Plan limit reached" : fetcher.data.error === "locked" ? "Feature locked" : "Could not save",
-        desc: fetcher.data.message,
+        title: fetcher.data.error === "quota" ? t("Plan limit reached") : fetcher.data.error === "locked" ? t("Feature locked") : t("Could not save"),
+        desc: tm(fetcher.data.message),
       });
     }
     setSubmitMode(null);
@@ -762,10 +800,10 @@ export default function CreateQr() {
     if (templateFetcher.state !== "idle" || !templateFetcher.data) return;
     const d = templateFetcher.data;
     if (d.intent === "template:save") {
-      if (d.ok) toast({ title: "Template saved", desc: `"${d.name}" added to your presets.` });
-      else      toast({ type: "error", title: "Could not save template", desc: d.message });
+      if (d.ok) toast({ title: t("Template saved"), desc: t("\"{name}\" added to your presets.", { name: d.name }) });
+      else      toast({ type: "error", title: t("Could not save template"), desc: tm(d.message) });
     } else if (d.intent === "template:delete") {
-      if (d.ok) toast({ title: "Template removed" });
+      if (d.ok) toast({ title: t("Template removed") });
     }
   }, [templateFetcher.state, templateFetcher.data]);
 
@@ -773,16 +811,16 @@ export default function CreateQr() {
 
   function validateBeforeSave() {
     if (!valid) {
-      toast({ type: "error", title: "Add a name first", desc: "QR code name is required before saving." });
+      toast({ type: "error", title: t("Add a name first"), desc: t("QR code name is required before saving.") });
       return false;
     }
     if (scheduleEnabled) {
       if (!activatesAt || !expiresAt) {
-        toast({ type: "error", title: "Schedule incomplete", desc: "Set both activation and expiration dates." });
+        toast({ type: "error", title: t("Schedule incomplete"), desc: t("Set both activation and expiration dates.") });
         return false;
       }
       if (new Date(expiresAt).getTime() <= new Date(activatesAt).getTime()) {
-        toast({ type: "error", title: "Invalid schedule", desc: "Expiration must be after activation." });
+        toast({ type: "error", title: t("Invalid schedule"), desc: t("Expiration must be after activation.") });
         return false;
       }
     }
@@ -793,7 +831,7 @@ export default function CreateQr() {
     if (!validateBeforeSave()) return;
     const id = savedQr?.id ?? editQr?.id;
     if (mode === "activate" && !id) {
-      toast({ type: "error", title: "Save first", desc: "Save this QR code before activating it." });
+      toast({ type: "error", title: t("Save first"), desc: t("Save this QR code before activating it.") });
       return;
     }
     const nextActive = mode === "activate" ? true : activated;
@@ -838,10 +876,14 @@ export default function CreateQr() {
     if (scheduleEnabled && activatesAt) fd.set("activatesAt", new Date(activatesAt).toISOString());
     if (scheduleEnabled && expiresAt)   fd.set("expiresAt",   new Date(expiresAt).toISOString());
     if (campaignId)  fd.set("campaignId",  campaignId);
-    if (!id && type === "promo" && autoCreateDiscount && target) {
+    if (isStoreType && type !== "promo") fd.set("discountCode", discountCode.trim());
+    const codeForAutoCreate = type === "promo" ? target : isStoreType ? discountCode : "";
+    if (!id && autoCreateDiscount && codeForAutoCreate.trim()) {
       fd.set("autoCreateDiscount", "1");
       fd.set("discountValuePct", String(discountValuePct / 100));
     }
+    if (plan.customFallback) fd.set("fallbackUrl", fallbackUrl.trim());
+    if (plan.smartRouting) fd.set("rules", JSON.stringify(routing));
     fd.set("activate", nextActive ? "1" : "0");
     setSubmitMode(mode);
     fetcher.submit(fd, { method: "post" });
@@ -849,19 +891,19 @@ export default function CreateQr() {
 
   async function handleDownload(format: DownloadFormat) {
     if (!savedQr) {
-      toast({ type: "error", title: "Save first", desc: "Save this QR code before downloading it." });
+      toast({ type: "error", title: t("Save first"), desc: t("Save this QR code before downloading it.") });
       return;
     }
     if (format !== "png" && !canExport) {
-      toast({ type: "info", title: `${format.toUpperCase()} download is locked`, desc: `Upgrade to ${exportPlan} for SVG and PDF files.` });
+      toast({ type: "info", title: t("{format} download is locked", { format: format.toUpperCase() }), desc: t("Upgrade to {exportPlan} for SVG and PDF files.", { exportPlan }) });
       return;
     }
     setDownloading(format);
     try {
       await downloadQrAsset({ id: savedQr.id, slug: savedQr.slug, name: name || savedQr.name || savedQr.slug }, format);
-      toast({ title: `${format.toUpperCase()} downloaded`, type: "info" });
+      toast({ title: t("{format} downloaded", { format: format.toUpperCase() }), type: "info" });
     } catch (err) {
-      toast({ type: "error", title: "Download failed", desc: err instanceof Error ? err.message : "Try again." });
+      toast({ type: "error", title: t("Download failed"), desc: err instanceof Error ? tm(err.message) : t("Try again.") });
     } finally {
       setDownloading(null);
     }
@@ -906,6 +948,7 @@ export default function CreateQr() {
     setTarget("");
     setShopifyRef(null);
     setSelectedLabel("");
+    setCartItems([]);
   }
 
   /* ── Template handlers ── */
@@ -940,7 +983,7 @@ export default function CreateQr() {
   function saveTemplate() {
     const name = templateName.trim();
     if (!name) {
-      toast({ type: "error", title: "Name required", desc: "Give the template a name first." });
+      toast({ type: "error", title: t("Name required"), desc: t("Give the template a name first.") });
       return;
     }
     const fd = new FormData();
@@ -953,9 +996,9 @@ export default function CreateQr() {
     setShowTemplateSave(false);
   }
 
-  function applyTemplate(t: typeof templates[number]) {
-    const d = t.design as Record<string, unknown>;
-    const l = t.label  as Record<string, unknown>;
+  function applyTemplate(item: typeof templates[number]) {
+    const d = item.design as Record<string, unknown>;
+    const l = item.label  as Record<string, unknown>;
     // Design
     if (typeof d.style === "string") setStyle(d.style as QrStyle);
     if (typeof d.cornerStyle === "string") setCornerStyle(d.cornerStyle as CornerStyle);
@@ -987,7 +1030,7 @@ export default function CreateQr() {
     if (typeof l.align === "string") setLabelAlign(l.align as "left" | "center" | "right");
     if (typeof l.labelColor === "string") setLabelTextColor(l.labelColor);
     if (typeof l.bandColor  === "string") setLabelBgColor(l.bandColor);
-    toast({ title: "Template applied", desc: t.name });
+    toast({ title: t("Template applied"), desc: item.name });
   }
 
   function removeTemplate(id: string) {
@@ -1011,37 +1054,59 @@ export default function CreateQr() {
       }
     } catch (err) {
       console.error("resourcePicker failed", err);
-      toast({ type: "error", title: "Picker unavailable", desc: "Open this app inside Shopify admin to pick products." });
+      toast({ type: "error", title: t("Picker unavailable"), desc: t("Open this app inside Shopify admin to pick products.") });
     }
   }
 
+  /** Add-to-cart: pick one or several variants (quantities are set in the list). */
   async function pickVariant() {
     try {
-      const result = await (shopify as unknown as { resourcePicker: (opts: { type: string; multiple: boolean; filter?: { variants?: boolean } }) => Promise<unknown> })
-        .resourcePicker({ type: "product", multiple: false, filter: { variants: true } });
+      const result = await (shopify as unknown as { resourcePicker: (opts: { type: string; multiple: boolean | number; filter?: { variants?: boolean } }) => Promise<unknown> })
+        .resourcePicker({ type: "product", multiple: 10, filter: { variants: true } });
       const arr = result as Array<{ id: string; title: string; handle: string; variants?: Array<{ id: string; title: string }> }> | undefined;
-      if (arr && arr.length > 0) {
-        const p = arr[0];
-        const v = p.variants?.[0];
-        if (v) {
-          // Variant gid → numeric id for /cart/{id}:1
+      if (!arr?.length) return;
+      const picked: CartItem[] = [];
+      for (const p of arr) {
+        for (const v of p.variants ?? []) {
+          // Variant gid → numeric id for /cart/{id}:{qty}
           const numericId = v.id.split("/").pop() ?? "";
-          setTarget(numericId);
-          setShopifyRef(v.id);
-          setSelectedLabel(`${p.title} — ${v.title}`);
+          if (!/^\d+$/.test(numericId)) continue;
+          const title = v.title && v.title !== "Default Title" ? `${p.title} — ${v.title}` : p.title;
+          picked.push({ variantId: numericId, title, quantity: 1 });
         }
       }
+      if (!picked.length) return;
+      // Keep quantities of variants already in the cart.
+      setCartItems(prev => picked.map(item => prev.find(x => x.variantId === item.variantId) ?? item).slice(0, 20));
+      setShopifyRef(arr[0].variants?.[0]?.id ?? arr[0].id);
     } catch (err) {
       console.error("resourcePicker (variant) failed", err);
-      toast({ type: "error", title: "Picker unavailable" });
+      toast({ type: "error", title: t("Picker unavailable"), desc: t("Open this app inside Shopify admin to pick products.") });
     }
   }
 
-  const tm = typeMeta(type);
+  async function pickCollection() {
+    try {
+      const result = await (shopify as unknown as { resourcePicker: (opts: { type: string; multiple: boolean }) => Promise<unknown> })
+        .resourcePicker({ type: "collection", multiple: false });
+      const arr = result as Array<{ id: string; title: string; handle: string }> | undefined;
+      if (arr && arr.length > 0) {
+        const c = arr[0];
+        setTarget(c.handle);
+        setShopifyRef(c.id);
+        setSelectedLabel(c.title);
+      }
+    } catch (err) {
+      console.error("resourcePicker (collection) failed", err);
+      toast({ type: "error", title: t("Picker unavailable"), desc: t("Open this app inside Shopify admin to pick collections.") });
+    }
+  }
+
+  const meta = typeMeta(type);
 
   const previewText = savedQr?.slug
     ? `${origin}/s/${savedQr.slug}`
-    : effectiveTarget || (name ? `${name} · ${tm.name}` : "TrackQr placeholder");
+    : effectiveTarget || (name ? `${name} · ${meta.name}` : "TrackQr placeholder");
 
   const labelFontSpec = getLabelFont(labelFont);
 
@@ -1049,6 +1114,7 @@ export default function CreateQr() {
     type === "home"  ? true :
     type === "wifi"  ? wifiSsid.length > 0 :
     type === "vcard" ? vcFull.length > 0 :
+    type === "atc"   ? cartItems.length > 0 :
     effectiveTarget.length > 0
   );
   const previewLabel: QrLabelOpts = {
@@ -1070,10 +1136,10 @@ export default function CreateQr() {
       <div className="page-head">
         <div className="page-head-left">
           <Button size="sm" variant="ghost" icon="chevron-left" onClick={() => navigate(isEditing ? "/app/qr-manager" : "/app")} style={{ marginBottom: 8, marginLeft: -10 }}>
-            {isEditing ? "Back to My QR codes" : "Back to dashboard"}
+            {isEditing ? t("Back to My QR codes") : t("Back to dashboard")}
           </Button>
-          <h1 className="page-h1">{isEditing ? "Edit" : "Create a"} <span className="em">QR code</span></h1>
-          <div className="page-sub">Configure the destination, customize the design, add a label, activate when ready.</div>
+          <h1 className="page-h1">{isEditing ? tem("Edit <em>QR code</em>") : tem("Create a <em>QR code</em>")}</h1>
+          <div className="page-sub">{t("Configure the destination, customize the design, add a label, activate when ready.")}</div>
         </div>
       </div>
 
@@ -1096,42 +1162,42 @@ export default function CreateQr() {
                 <div>
                   <div className="section-h" style={{ fontSize: 15, marginBottom: 4 }}>
                     <Icon name="layers" size={14} style={{ verticalAlign: "-2px", marginRight: 6, color: "var(--accent)" }} />
-                    Templates
+                    {t("Templates")}
                   </div>
-                  <div className="section-sub">Apply a saved design preset or capture the current style.</div>
+                  <div className="section-sub">{t("Apply a saved design preset or capture the current style.")}</div>
                 </div>
                 <Button size="sm" variant="secondary" icon="save" onClick={() => setShowTemplateSave(v => !v)}>
-                  {showTemplateSave ? "Cancel" : "Save current"}
+                  {showTemplateSave ? t("Cancel") : t("Save current")}
                 </Button>
               </div>
 
               {showTemplateSave && (
                 <div className="mt-3" style={{ display: "flex", gap: 8 }}>
                   <Input
-                    placeholder="e.g. Brand summer 2026"
+                    placeholder={t("e.g. Brand summer 2026")}
                     value={templateName}
                     onChange={e => setTemplateName(e.target.value)}
                     onKeyDown={e => { if (e.key === "Enter") { e.preventDefault(); saveTemplate(); } }}
                     style={{ flex: 1 }}
                   />
-                  <Button size="md" variant="primary" onClick={saveTemplate}>Save</Button>
+                  <Button size="md" variant="primary" onClick={saveTemplate}>{t("Save")}</Button>
                 </div>
               )}
 
               {templates.length > 0 && (
                 <div className="template-grid mt-3">
-                  {templates.map(t => {
-                    const td = t.design as { fg?: string; bg?: string; gradient?: { from: string; to: string } | null };
+                  {templates.map(tpl => {
+                    const td = tpl.design as { fg?: string; bg?: string; gradient?: { from: string; to: string } | null };
                     const swatchFg = td.gradient?.from ?? td.fg ?? "#0B1220";
                     const swatchFg2 = td.gradient?.to ?? swatchFg;
                     const swatchBg = td.bg ?? "#FFFFFF";
                     return (
-                      <div key={t.id} className="template-card">
+                      <div key={tpl.id} className="template-card">
                         <button
                           type="button"
                           className="template-apply"
-                          onClick={() => applyTemplate(t)}
-                          title={`Apply "${t.name}"`}
+                          onClick={() => applyTemplate(tpl)}
+                          title={t("Apply \"{name}\"", { name: tpl.name })}
                         >
                           <div
                             className="template-swatch"
@@ -1139,14 +1205,14 @@ export default function CreateQr() {
                           >
                             <div className="template-swatch-inner" style={{ background: swatchBg }} />
                           </div>
-                          <div className="template-name">{t.name}</div>
+                          <div className="template-name">{tpl.name}</div>
                         </button>
                         <button
                           type="button"
                           className="template-del"
-                          onClick={(e) => { e.stopPropagation(); removeTemplate(t.id); }}
-                          title="Delete template"
-                          aria-label={`Delete ${t.name}`}
+                          onClick={(e) => { e.stopPropagation(); removeTemplate(tpl.id); }}
+                          title={t("Delete template")}
+                          aria-label={t("Delete {name}", { name: tpl.name })}
                         >
                           <Icon name="trash" size={11} />
                         </button>
@@ -1162,62 +1228,64 @@ export default function CreateQr() {
           {canCustomDesign && templates.length === 0 && !showTemplateSave && (
             <div style={{ textAlign: "right", margin: "-4px 0 0" }}>
               <Button size="sm" variant="ghost" icon="save" onClick={() => setShowTemplateSave(true)}>
-                Save this design as a template
+                {t("Save this design as a template")}
               </Button>
             </div>
           )}
 
           {/* Basics */}
           <Card className="card-pad-lg">
-            <div className="section-h" style={{ fontSize: 15, marginBottom: 4 }}>Basics</div>
-            <div className="section-sub">Internal label and notes — only visible to your team.</div>
+            <div className="section-h" style={{ fontSize: 15, marginBottom: 4 }}>{t("Basics")}</div>
+            <div className="section-sub">{t("Internal label and notes — only visible to your team.")}</div>
             <div className="grid grid-2 mt-4">
-              <Field label="QR code name" required hint="e.g. 'Summer drop · Hero banner'">
-                <Input placeholder="Untitled QR code" value={name} onChange={e => setName(e.target.value)} />
+              <Field label={t("QR code name")} required hint={t("e.g. 'Summer drop · Hero banner'")}>
+                <Input placeholder={t("Untitled QR code")} value={name} onChange={e => setName(e.target.value)} />
               </Field>
-              <Field label="Description" hint="Optional — visible in My QR codes">
-                <Input placeholder="Add a description" value={description} onChange={e => setDescription(e.target.value)} />
+              <Field label={t("Description")} hint={t("Optional — visible in My QR codes")}>
+                <Input placeholder={t("Add a description")} value={description} onChange={e => setDescription(e.target.value)} />
               </Field>
             </div>
           </Card>
 
           {/* Destination */}
           <Card className="card-pad-lg">
-            <div className="section-h" style={{ fontSize: 15, marginBottom: 4 }}>Destination</div>
-            <div className="section-sub">Pick what visitors will see when they scan.</div>
+            <div className="section-h" style={{ fontSize: 15, marginBottom: 4 }}>{t("Destination")}</div>
+            <div className="section-sub">{t("Pick what visitors will see when they scan.")}</div>
 
             <div className="text-xs strong" style={{ color: "var(--fg-muted)", margin: "16px 0 8px", letterSpacing: ".06em", textTransform: "uppercase", fontFamily: "var(--ff-mono)" }}>
-              Shopify
+              {t("Shopify")}
             </div>
             <div className="tile-grid">
-              {QR_TYPES.filter(t => t.group === "shopify").map(t => (
-                <div key={t.id} className={`tile ${type === t.id ? "active" : ""}`}
-                  onClick={() => changeType(t.id as QrTypeId)}>
-                  <div className="tile-icon"><Icon name={t.icon} /></div>
-                  <div className="tile-name">{t.name}</div>
-                </div>
+              {QR_TYPES.filter(item => item.group === "shopify" || (item.group === "legacy" && type === item.id)).map(item => (
+                <button type="button" key={item.id} className={`tile ${type === item.id ? "active" : ""}`}
+                  aria-pressed={type === item.id}
+                  onClick={() => changeType(item.id as QrTypeId)}>
+                  <div className="tile-icon"><Icon name={item.icon} /></div>
+                  <div className="tile-name">{t(item.name)}</div>
+                </button>
               ))}
             </div>
 
             <div className="text-xs strong" style={{ color: "var(--fg-muted)", margin: "20px 0 8px", letterSpacing: ".06em", textTransform: "uppercase", fontFamily: "var(--ff-mono)" }}>
-              Custom
+              {t("Custom")}
             </div>
             <div className="tile-grid">
-              {QR_TYPES.filter(t => t.group === "custom").map(t => (
-                <div key={t.id} className={`tile ${type === t.id ? "active" : ""}`}
-                  onClick={() => changeType(t.id as QrTypeId)}>
-                  <div className="tile-icon"><Icon name={t.icon} /></div>
-                  <div className="tile-name">{t.name}</div>
-                </div>
+              {QR_TYPES.filter(item => item.group === "custom").map(item => (
+                <button type="button" key={item.id} className={`tile ${type === item.id ? "active" : ""}`}
+                  aria-pressed={type === item.id}
+                  onClick={() => changeType(item.id as QrTypeId)}>
+                  <div className="tile-icon"><Icon name={item.icon} /></div>
+                  <div className="tile-name">{t(item.name)}</div>
+                </button>
               ))}
             </div>
 
             <div className="mt-6">
               {type === "product" && (
-                <Field label="Shopify product" hint="Browse your live Shopify catalog.">
+                <Field label={t("Shopify product")} hint={t("Browse your live Shopify catalog.")}>
                   <div className="flex items-center gap-2">
                     <Button variant="secondary" icon="search" onClick={pickProduct}>
-                      {selectedLabel ? "Change product" : "Browse products"}
+                      {selectedLabel ? t("Change product") : t("Browse products")}
                     </Button>
                     {selectedLabel && (
                       <div style={{
@@ -1234,60 +1302,136 @@ export default function CreateQr() {
                 </Field>
               )}
 
-              {type === "atc" && (
-                <Field label="Product variant" hint="Visitor lands on cart with this variant added.">
+              {type === "collection" && (
+                <Field label={t("Shopify collection")} hint={t("Scans open the collection page of your store.")}>
                   <div className="flex items-center gap-2">
-                    <Button variant="secondary" icon="search" onClick={pickVariant}>
-                      {selectedLabel ? "Change variant" : "Browse products & variants"}
+                    <Button variant="secondary" icon="search" onClick={pickCollection}>
+                      {selectedLabel || target ? t("Change collection") : t("Browse collections")}
                     </Button>
-                    {selectedLabel && (
-                      <div style={{
-                        flex: 1, fontSize: 13, padding: "8px 12px",
-                        background: "var(--bg-sunken)", border: "1px solid var(--border-soft)",
-                        borderRadius: 8, display: "flex", alignItems: "center", gap: 8,
-                      }}>
-                        <Icon name="shopping-cart" size={14} style={{ color: "var(--accent)" }} />
-                        <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{selectedLabel}</span>
+                    {(selectedLabel || target) && (
+                      <div className="picked-chip">
+                        <Icon name="grid" size={14} style={{ color: "var(--accent)" }} />
+                        <span className="picked-chip-label">{selectedLabel || target}</span>
+                        <span className="picked-chip-path">/collections/{target}</span>
                       </div>
                     )}
                   </div>
                 </Field>
               )}
 
+              {type === "page" && (
+                <Field label={t("Page of your store")} hint={t("A page, blog post, policy or any path of your storefront — e.g. /pages/about-us or /blogs/news/spring-lookbook.")}>
+                  <div className="input-prefix">
+                    <span className="input-prefix-label">{shopDomain}</span>
+                    <input
+                      className="input"
+                      placeholder="/pages/about-us"
+                      value={target}
+                      onChange={e => setTarget(e.target.value.trim().startsWith("http") ? e.target.value.trim() : e.target.value)}
+                    />
+                  </div>
+                </Field>
+              )}
+
+              {type === "atc" && (
+                <Field label={t("Products added to the cart")} hint={t("Scans open a pre-filled cart with these variants and quantities (up to 20).")}>
+                  <div className="col gap-2">
+                    {cartItems.length > 0 && (
+                      <div className="cart-items">
+                        {cartItems.map(item => (
+                          <div key={item.variantId} className="cart-item">
+                            <Icon name="shopping-cart" size={14} style={{ color: "var(--accent)", flexShrink: 0 }} />
+                            <span className="cart-item-title">{item.title}</span>
+                            <div className="qty-stepper" role="group" aria-label={t("Quantity for {title}", { title: item.title })}>
+                              <button type="button" aria-label={t("Decrease quantity")} disabled={item.quantity <= 1}
+                                onClick={() => setCartItems(items => items.map(i => i.variantId === item.variantId ? { ...i, quantity: Math.max(1, i.quantity - 1) } : i))}>−</button>
+                              <span className="num">{item.quantity}</span>
+                              <button type="button" aria-label={t("Increase quantity")} disabled={item.quantity >= 99}
+                                onClick={() => setCartItems(items => items.map(i => i.variantId === item.variantId ? { ...i, quantity: Math.min(99, i.quantity + 1) } : i))}>+</button>
+                            </div>
+                            <button type="button" className="routing-icon-btn danger" aria-label={t("Remove {title}", { title: item.title })}
+                              onClick={() => setCartItems(items => items.filter(i => i.variantId !== item.variantId))}>
+                              <Icon name="x" size={13} />
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    <div>
+                      <Button variant="secondary" icon="search" onClick={pickVariant}>
+                        {cartItems.length ? t("Change products") : t("Browse products & variants")}
+                      </Button>
+                    </div>
+                  </div>
+                </Field>
+              )}
+
+              {isStoreType && type !== "promo" && (
+                <div className="mt-4 discount-box">
+                  <Field label={t("Apply a discount code (optional)")} hint={t("The code is applied automatically when the QR code is scanned — great for in-store and packaging offers.")}>
+                    <Input icon="tag" placeholder="WELCOME10" value={discountCode} onChange={e => setDiscountCode(e.target.value.toUpperCase())} />
+                  </Field>
+                  {discountCode.trim() && !isEditing && (
+                    <div className="mt-3">
+                      <label style={{ display: "flex", alignItems: "center", gap: 10, cursor: "pointer" }}>
+                        <input
+                          type="checkbox"
+                          checked={autoCreateDiscount}
+                          onChange={e => setAutoCreateDiscount(e.target.checked)}
+                          style={{ accentColor: "var(--accent)", cursor: "pointer" }}
+                        />
+                        <span style={{ fontSize: 12.5, color: "var(--fg-strong)" }}>{t("Create this code in Shopify ({value}% off)", { value: discountValuePct })}</span>
+                      </label>
+                      {autoCreateDiscount && (
+                        <RangeSlider
+                          min={5}
+                          max={50}
+                          step={5}
+                          value={discountValuePct}
+                          onChange={setDiscountValuePct}
+                          className="mt-2"
+                          aria-label={t("Discount value")}
+                        />
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
+
               {type === "promo" && (
                 <>
-                  <Field label="Discount code" hint="Customer lands at checkout with code pre-applied.">
+                  <Field label={t("Discount code")} hint={t("The code is applied to the visitor's cart and they land on your store.")}>
                     <Input icon="tag" placeholder="FREESHIP" value={target} onChange={e => setTarget(e.target.value.toUpperCase())} />
                   </Field>
                   <div className="mt-3" style={{ padding: 12, background: "var(--bg-sunken)", border: "1px solid var(--border-soft)", borderRadius: 10 }}>
                     <label style={{ display: "flex", alignItems: "center", gap: 10, cursor: "pointer" }}>
                       <input
                         type="checkbox"
+                        aria-label={t("Auto-create this discount in Shopify")}
                         checked={autoCreateDiscount}
                         onChange={e => setAutoCreateDiscount(e.target.checked)}
                         style={{ accentColor: "var(--accent)", cursor: "pointer" }}
                       />
                       <div>
                         <div style={{ fontSize: 13, fontWeight: 500, color: "var(--fg-strong)" }}>
-                          Auto-create this discount in Shopify
+                          {t("Auto-create this discount in Shopify")}
                         </div>
                         <div style={{ fontSize: 11.5, color: "var(--fg-muted)" }}>
-                          Creates a percentage-off discount code via Shopify Admin. Skip if the code already exists.
+                          {t("Creates a percentage-off discount code via Shopify Admin. Skip if the code already exists.")}
                         </div>
                       </div>
                     </label>
                     {autoCreateDiscount && (
                       <div className="mt-3" style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                        <div style={{ fontSize: 12, color: "var(--fg-muted)", minWidth: 70 }}>Value · {discountValuePct}%</div>
-                        <input
-                          type="range"
+                        <div style={{ fontSize: 12, color: "var(--fg-muted)", minWidth: 70 }}>{t("Value · {value}%", { value: discountValuePct })}</div>
+                        <RangeSlider
                           min={5}
                           max={50}
                           step={5}
                           value={discountValuePct}
-                          onChange={e => setDiscountValuePct(Number(e.target.value))}
-                          className="range-slider"
+                          onChange={setDiscountValuePct}
                           style={{ flex: 1 }}
+                          aria-label={t("Discount value")}
                         />
                       </div>
                     )}
@@ -1296,7 +1440,7 @@ export default function CreateQr() {
               )}
 
               {(type === "link" || type === "url") && (
-                <Field label="Destination URL" hint="Any https:// link.">
+                <Field label={t("Destination URL")} hint={t("Any https:// link — you can change it later without reprinting.")}>
                   <Input icon="link" placeholder="https://aurora.co/landing" value={target} onChange={e => setTarget(e.target.value)} />
                 </Field>
               )}
@@ -1304,24 +1448,24 @@ export default function CreateQr() {
               {type === "home" && (
                 <div className="text-sm muted" style={{ padding: 12, background: "var(--bg-sunken)", borderRadius: 8, border: "1px solid var(--border-soft)" }}>
                   <Icon name="home" size={13} style={{ verticalAlign: "-2px", marginRight: 6 }} />
-                  Scans will open your storefront home page. No additional config required.
+                  {t("Scans will open your storefront home page. No additional config required.")}
                 </div>
               )}
 
               {type === "text" && (
-                <Field label="Text content" hint="Shown on a landing page when scanned (with copy-to-clipboard).">
-                  <Textarea placeholder="Anything you want — instructions, a message, a serial number…" value={target} onChange={e => setTarget(e.target.value)} rows={3} />
+                <Field label={t("Text content")} hint={t("Shown on a landing page when scanned (with copy-to-clipboard).")}>
+                  <Textarea placeholder={t("Anything you want — instructions, a message, a serial number…")} value={target} onChange={e => setTarget(e.target.value)} rows={3} />
                 </Field>
               )}
 
               {(type === "phone" || type === "sms") && (
-                <Field label={type === "sms" ? "SMS number" : "Phone number"} hint="International format recommended (E.164).">
+                <Field label={type === "sms" ? t("SMS number") : t("Phone number")} hint={t("International format recommended (E.164).")}>
                   <Input icon={type === "sms" ? "message-square" : "phone"} placeholder="+1 800 278 7622" value={target} onChange={e => setTarget(e.target.value)} />
                 </Field>
               )}
 
               {type === "email" && (
-                <Field label="Email address" hint="Tapping the QR opens the visitor's mail app.">
+                <Field label={t("Email address")} hint={t("Tapping the QR opens the visitor's mail app.")}>
                   <Input icon="mail" placeholder="hello@aurora.co" value={target} onChange={e => setTarget(e.target.value)} />
                 </Field>
               )}
@@ -1329,38 +1473,38 @@ export default function CreateQr() {
               {type === "wifi" && (
                 <>
                   <div className="grid grid-2">
-                    <Field label="Network name (SSID)" required>
-                      <Input icon="wifi" placeholder="Aurora Guest" value={wifiSsid} onChange={e => setWifiSsid(e.target.value)} />
+                    <Field label={t("Network name (SSID)")} required>
+                      <Input icon="wifi" placeholder={t("Aurora Guest")} value={wifiSsid} onChange={e => setWifiSsid(e.target.value)} />
                     </Field>
-                    <Field label="Encryption">
+                    <Field label={t("Encryption")}>
                       <Segmented value={wifiEnc} onChange={v => setWifiEnc(v as "WPA" | "WEP" | "nopass")}
                         options={[
                           { value: "WPA", label: "WPA/WPA2" },
                           { value: "WEP", label: "WEP" },
-                          { value: "nopass", label: "None" },
+                          { value: "nopass", label: t("None") },
                         ]} />
                     </Field>
                   </div>
                   {wifiEnc !== "nopass" && (
-                    <Field label="Password" className="mt-4">
+                    <Field label={t("Password")} className="mt-4">
                       <Input type="password" placeholder="••••••••" value={wifiPwd} onChange={e => setWifiPwd(e.target.value)} />
                     </Field>
                   )}
-                  <div className="text-xs muted mt-2">Camera apps will auto-prompt to connect on iOS &amp; Android.</div>
+                  <div className="text-xs muted mt-2">{t("Camera apps will auto-prompt to connect on iOS & Android.")}</div>
                 </>
               )}
 
               {type === "vcard" && (
                 <>
                   <div className="grid grid-2">
-                    <Field label="Full name" required><Input placeholder="Aurora Sasaki" value={vcFull} onChange={e => setVcFull(e.target.value)} /></Field>
-                    <Field label="Title"><Input placeholder="Founder" value={vcTitle} onChange={e => setVcTitle(e.target.value)} /></Field>
-                    <Field label="Organization"><Input placeholder="Aurora Studios" value={vcOrg} onChange={e => setVcOrg(e.target.value)} /></Field>
-                    <Field label="Phone"><Input icon="phone" placeholder="+1 800 278 7622" value={vcPhone} onChange={e => setVcPhone(e.target.value)} /></Field>
-                    <Field label="Email"><Input icon="mail" placeholder="aurora@aurora.co" value={vcEmail} onChange={e => setVcEmail(e.target.value)} /></Field>
-                    <Field label="Website"><Input icon="link" placeholder="https://aurora.co" value={vcUrl} onChange={e => setVcUrl(e.target.value)} /></Field>
+                    <Field label={t("Full name")} required><Input placeholder={t("Aurora Sasaki")} value={vcFull} onChange={e => setVcFull(e.target.value)} /></Field>
+                    <Field label={t("Title")}><Input placeholder={t("Founder")} value={vcTitle} onChange={e => setVcTitle(e.target.value)} /></Field>
+                    <Field label={t("Organization")}><Input placeholder={t("Aurora Studios")} value={vcOrg} onChange={e => setVcOrg(e.target.value)} /></Field>
+                    <Field label={t("Phone")}><Input icon="phone" placeholder="+1 800 278 7622" value={vcPhone} onChange={e => setVcPhone(e.target.value)} /></Field>
+                    <Field label={t("Email")}><Input icon="mail" placeholder="aurora@aurora.co" value={vcEmail} onChange={e => setVcEmail(e.target.value)} /></Field>
+                    <Field label={t("Website")}><Input icon="link" placeholder="https://aurora.co" value={vcUrl} onChange={e => setVcUrl(e.target.value)} /></Field>
                   </div>
-                  <div className="text-xs muted mt-2">Scanning prompts "Add contact" in the camera app.</div>
+                  <div className="text-xs muted mt-2">{t("Scanning prompts “Add contact” in the camera app.")}</div>
                 </>
               )}
             </div>
@@ -1370,59 +1514,61 @@ export default function CreateQr() {
           <Card className="card-pad-lg">
             <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12 }}>
               <div>
-                <div className="section-h" style={{ fontSize: 15, marginBottom: 4 }}>Design</div>
+                <div className="section-h" style={{ fontSize: 15, marginBottom: 4 }}>{t("Design")}</div>
                 <div className="section-sub">
                   {canCustomDesign
-                    ? "Pattern, finders, colors and an optional logo at the center."
-                    : `Standard style on the ${plan.name} plan — dark modules on white, square pattern, no logo.`}
+                    ? t("Pattern, finders, colors and an optional logo at the center.")
+                    : t("Standard style on the {name} plan — dark modules on white, square pattern, no logo.", { name: plan.name })}
                 </div>
               </div>
               {canCustomDesign && (
-                <Button size="sm" variant="ghost" icon="undo" onClick={resetDesign} title="Reset design to defaults">Reset</Button>
+                <Button size="sm" variant="ghost" icon="undo" onClick={resetDesign} title={t("Reset design to defaults")}>{t("Reset")}</Button>
               )}
             </div>
 
             {!canCustomDesign ? (
               <div className="mt-4">
                 <FeatureLock
-                  title="Logo, colors, shapes & gradients"
-                  desc={`Brand your QR codes with your logo, custom colors, rounded or dotted patterns and saved design templates on ${designPlan}.${isEditing ? " Designs saved on a higher plan come back as soon as you upgrade." : ""}`}
+                  title={t("Logo, colors, shapes & gradients")}
+                  desc={isEditing
+                    ? t("Brand your QR codes with your logo, custom colors, rounded or dotted patterns and saved design templates on {plan}. Designs saved on a higher plan come back as soon as you upgrade.", { plan: designPlan })
+                    : t("Brand your QR codes with your logo, custom colors, rounded or dotted patterns and saved design templates on {plan}.", { plan: designPlan })}
                   plan={designPlan}
                 />
               </div>
             ) : (
             <>
-            <Field label="Pattern style" hint="Affects every module except the corner finders." className="mt-4">
+            <Field label={t("Pattern style")} hint={t("Affects every module except the corner finders.")} className="mt-4">
               <div className="style-picker">
                 {QR_STYLES.map(s => (
-                  <div key={s} className={`style-opt ${style === s ? "active" : ""}`} onClick={() => setStyle(s)}>
+                  <button type="button" key={s} className={`style-opt ${style === s ? "active" : ""}`} aria-pressed={style === s} onClick={() => setStyle(s)}>
                     <div className="style-opt-illus">
                       <StyleIllus qrStyle={s} size={36} />
                     </div>
                     <div className="style-opt-label">{s}</div>
-                  </div>
+                  </button>
                 ))}
               </div>
             </Field>
 
-            <Field label="Corner finders" hint="The three big squares — affect scanning reliability." className="mt-4">
+            <Field label={t("Corner finders")} hint={t("The three big squares — affect scanning reliability.")} className="mt-4">
               <div className="style-picker" style={{ gridTemplateColumns: "repeat(3, 1fr)" }}>
                 {QR_CORNERS.map(c => (
-                  <div key={c} className={`style-opt ${cornerStyle === c ? "active" : ""}`} onClick={() => setCornerStyle(c)}>
+                  <button type="button" key={c} className={`style-opt ${cornerStyle === c ? "active" : ""}`} aria-pressed={cornerStyle === c} onClick={() => setCornerStyle(c)}>
                     <div className="style-opt-illus"><CornerMini corner={c} /></div>
                     <div className="style-opt-label">{c.replace("-", " ")}</div>
-                  </div>
+                  </button>
                 ))}
               </div>
             </Field>
 
             <div className="grid grid-2 mt-4">
-              <Field label="Foreground" hint="The dark modules.">
+              <Field label={t("Foreground")} hint={t("The dark modules.")}>
                 <div className="swatch-row">
                   {QR_COLORS.map(c => (
-                    <div key={c} className={`swatch ${fg === c ? "active" : ""}`} style={{ background: c }} onClick={() => setFg(c)} />
+                    <button type="button" key={c} className={`swatch ${fg === c ? "active" : ""}`} style={{ background: c }} aria-label={t("Color {c}", { c })} aria-pressed={fg === c} onClick={() => setFg(c)} />
                   ))}
-                  <label className={`swatch swatch-picker ${!QR_COLORS.includes(fg) ? "active" : ""}`} title="Custom color">
+                  <label className={`swatch swatch-picker ${!QR_COLORS.includes(fg) ? "active" : ""}`} title={t("Custom color")}>
                     <input type="color" value={fg} onChange={e => setFg(e.target.value)} />
                     <span className="picker-icon"><Icon name="edit" size={11} /></span>
                   </label>
@@ -1434,12 +1580,12 @@ export default function CreateQr() {
                   </div>
                 )}
               </Field>
-              <Field label="Background" hint="Keep contrast strong for reliable scanning.">
+              <Field label={t("Background")} hint={t("Keep contrast strong for reliable scanning.")}>
                 <div className="swatch-row">
                   {QR_BG_COLORS.map(c => (
-                    <div key={c} className={`swatch ${bg === c ? "active" : ""}`} style={{ background: c }} onClick={() => setBg(c)} />
+                    <button type="button" key={c} className={`swatch ${bg === c ? "active" : ""}`} style={{ background: c }} aria-label={t("Color {c}", { c })} aria-pressed={bg === c} onClick={() => setBg(c)} />
                   ))}
-                  <label className={`swatch swatch-picker ${!QR_BG_COLORS.includes(bg) ? "active" : ""}`} title="Custom color">
+                  <label className={`swatch swatch-picker ${!QR_BG_COLORS.includes(bg) ? "active" : ""}`} title={t("Custom color")}>
                     <input type="color" value={bg} onChange={e => setBg(e.target.value)} />
                     <span className="picker-icon"><Icon name="edit" size={11} /></span>
                   </label>
@@ -1464,54 +1610,40 @@ export default function CreateQr() {
                 name={contrastInfo.level === "ok" ? "circle-check" : "alert-triangle"}
                 size={13}
               />
-              <span>{contrastInfo.message}</span>
+              <span>{tm(contrastInfo.message)}</span>
             </div>
 
-            <Field label="Center logo" hint="Pick a brand logo or upload your own. Higher error correction is auto-applied." className="mt-4">
+            <Field label={t("Center logo")} hint={t("Pick a brand logo or upload your own. Higher error correction is auto-applied.")} className="mt-4">
               <LogoPicker value={logoSel} onChange={setLogoSel} />
             </Field>
 
             {logoSel.kind !== "none" && (
-              <Field label={`Logo size · ${logoSizePct}%`} hint="Smaller logo = more reliable scan. 20% is the sweet spot." className="mt-4">
-                <input
-                  type="range"
-                  min={10}
-                  max={30}
-                  step={1}
-                  value={logoSizePct}
-                  onChange={e => setLogoSizePct(Number(e.target.value))}
-                  className="range-slider"
-                />
+              <Field label={t("Logo size · {logoSizePct}%", { logoSizePct })} hint={t("Smaller logo = more reliable scan. 20% is the sweet spot.")} className="mt-4">
+                <RangeSlider min={10} max={30} step={1} value={logoSizePct} onChange={setLogoSizePct} aria-label={t("Logo size")} />
               </Field>
             )}
 
             {/* ── Advanced design controls ── */}
             <div className="advanced-divider mt-6">
-              <span>Advanced</span>
+              <span>{t("Advanced")}</span>
             </div>
 
-            <Field label={`Quiet zone (margin) · ${qrMargin}px`} hint="White space around the QR. Bigger = more reliable scanning, especially in print." className="mt-3">
-              <input
-                type="range"
-                min={0}
-                max={24}
-                step={2}
-                value={qrMargin}
-                onChange={e => setQrMargin(Number(e.target.value))}
-                className="range-slider"
-              />
+            <Field label={t("Quiet zone (margin) · {qrMargin}px", { qrMargin })} hint={t("White space around the QR. Bigger = more reliable scanning, especially in print.")} className="mt-3">
+              <RangeSlider min={0} max={24} step={2} value={qrMargin} onChange={setQrMargin} aria-label={t("Quiet zone")} />
             </Field>
 
-            <Field label="Finder (eye) color" hint="Color of the 3 corner squares. Defaults to the foreground." className="mt-4">
+            <Field label={t("Finder (eye) color")} hint={t("Color of the 3 corner squares. Defaults to the foreground.")} className="mt-4">
               <div className="swatch-row">
                 {QR_COLORS.map(c => (
-                  <div key={c}
+                  <button type="button" key={c}
                     className={`swatch ${cornerColor === c ? "active" : ""}`}
                     style={{ background: c }}
+                    aria-label={t("Color {c}", { c })}
+                    aria-pressed={cornerColor === c}
                     onClick={() => { cornerCustomized.current = true; setCornerColor(c); }}
                   />
                 ))}
-                <label className={`swatch swatch-picker ${!QR_COLORS.includes(cornerColor) ? "active" : ""}`} title="Custom color">
+                <label className={`swatch swatch-picker ${!QR_COLORS.includes(cornerColor) ? "active" : ""}`} title={t("Custom color")}>
                   <input type="color" value={cornerColor} onChange={e => { cornerCustomized.current = true; setCornerColor(e.target.value); }} />
                   <span className="picker-icon"><Icon name="edit" size={11} /></span>
                 </label>
@@ -1520,67 +1652,59 @@ export default function CreateQr() {
                     type="button"
                     className="link-btn"
                     onClick={() => { cornerCustomized.current = false; setCornerColor(fg); }}
-                    title="Sync with foreground"
+                    title={t("Sync with foreground")}
                     style={{ marginLeft: 6 }}
                   >
-                    sync with fg
+                    {t("sync with fg")}
                   </button>
                 )}
               </div>
             </Field>
 
             <Field
-              label="Gradient foreground"
-              hint="Use a linear gradient instead of a flat color for the QR modules. Premium look."
+              label={t("Gradient foreground")}
+              hint={t("Use a linear gradient instead of a flat color for the QR modules. Premium look.")}
               className="mt-4"
             >
               <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: gradientOn ? 10 : 0 }}>
                 <label className="toggle">
-                  <input type="checkbox" checked={gradientOn} onChange={e => setGradientOn(e.target.checked)} />
+                  <input type="checkbox" aria-label={t("Gradient foreground")} checked={gradientOn} onChange={e => setGradientOn(e.target.checked)} />
                   <span className="toggle-track"><span className="toggle-thumb" /></span>
                 </label>
                 <span style={{ fontSize: 12.5, color: "var(--fg-muted)" }}>
-                  {gradientOn ? "Gradient active — overrides foreground color" : "Solid foreground"}
+                  {gradientOn ? t("Gradient active — overrides foreground color") : t("Solid foreground")}
                 </span>
               </div>
 
               {gradientOn && (
                 <div className="grid grid-2" style={{ gap: 10 }}>
                   <div>
-                    <div style={{ fontSize: 11.5, color: "var(--fg-muted)", marginBottom: 4 }}>From</div>
+                    <div style={{ fontSize: 11.5, color: "var(--fg-muted)", marginBottom: 4 }}>{t("From")}</div>
                     <div className="swatch-row">
                       {QR_COLORS.map(c => (
-                        <div key={c} className={`swatch ${gradientFrom === c ? "active" : ""}`} style={{ background: c }} onClick={() => setGradientFrom(c)} />
+                        <button type="button" key={c} className={`swatch ${gradientFrom === c ? "active" : ""}`} style={{ background: c }} aria-label={t("Color {c}", { c })} aria-pressed={gradientFrom === c} onClick={() => setGradientFrom(c)} />
                       ))}
-                      <label className={`swatch swatch-picker ${!QR_COLORS.includes(gradientFrom) ? "active" : ""}`} title="Custom color">
+                      <label className={`swatch swatch-picker ${!QR_COLORS.includes(gradientFrom) ? "active" : ""}`} title={t("Custom color")}>
                         <input type="color" value={gradientFrom} onChange={e => setGradientFrom(e.target.value)} />
                         <span className="picker-icon"><Icon name="edit" size={11} /></span>
                       </label>
                     </div>
                   </div>
                   <div>
-                    <div style={{ fontSize: 11.5, color: "var(--fg-muted)", marginBottom: 4 }}>To</div>
+                    <div style={{ fontSize: 11.5, color: "var(--fg-muted)", marginBottom: 4 }}>{t("To")}</div>
                     <div className="swatch-row">
                       {QR_COLORS.map(c => (
-                        <div key={c} className={`swatch ${gradientTo === c ? "active" : ""}`} style={{ background: c }} onClick={() => setGradientTo(c)} />
+                        <button type="button" key={c} className={`swatch ${gradientTo === c ? "active" : ""}`} style={{ background: c }} aria-label={t("Color {c}", { c })} aria-pressed={gradientTo === c} onClick={() => setGradientTo(c)} />
                       ))}
-                      <label className={`swatch swatch-picker ${!QR_COLORS.includes(gradientTo) ? "active" : ""}`} title="Custom color">
+                      <label className={`swatch swatch-picker ${!QR_COLORS.includes(gradientTo) ? "active" : ""}`} title={t("Custom color")}>
                         <input type="color" value={gradientTo} onChange={e => setGradientTo(e.target.value)} />
                         <span className="picker-icon"><Icon name="edit" size={11} /></span>
                       </label>
                     </div>
                   </div>
                   <div style={{ gridColumn: "1 / -1" }}>
-                    <div style={{ fontSize: 11.5, color: "var(--fg-muted)", marginBottom: 4 }}>Angle · {gradientAngle}°</div>
-                    <input
-                      type="range"
-                      min={0}
-                      max={360}
-                      step={15}
-                      value={gradientAngle}
-                      onChange={e => setGradientAngle(Number(e.target.value))}
-                      className="range-slider"
-                    />
+                    <div style={{ fontSize: 11.5, color: "var(--fg-muted)", marginBottom: 4 }}>{t("Angle · {angle}°", { angle: gradientAngle })}</div>
+                    <RangeSlider min={0} max={360} step={15} value={gradientAngle} onChange={setGradientAngle} aria-label={t("Gradient angle")} />
                   </div>
                 </div>
               )}
@@ -1593,30 +1717,30 @@ export default function CreateQr() {
           <Card className="card-pad-lg">
             <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12 }}>
               <div>
-                <div className="section-h" style={{ fontSize: 15, marginBottom: 4 }}>Label</div>
-                <div className="section-sub">Add text around the QR — "Scan me", a brand name, or a tagline.</div>
+                <div className="section-h" style={{ fontSize: 15, marginBottom: 4 }}>{t("Label")}</div>
+                <div className="section-sub">{t("Add text around the QR — “Scan me”, a brand name, or a tagline.")}</div>
               </div>
               {canCustomDesign && (
-                <Button size="sm" variant="ghost" icon="undo" onClick={resetLabel} title="Reset label formatting to defaults">Reset</Button>
+                <Button size="sm" variant="ghost" icon="undo" onClick={resetLabel} title={t("Reset label formatting to defaults")}>{t("Reset")}</Button>
               )}
             </div>
 
-            <Field label="Text" hint={`${labelText.length}/20 chars · keep it short for the best read`} className="mt-4">
+            <Field label={t("Text")} hint={t("{length}/20 chars · keep it short for the best read", { length: labelText.length })} className="mt-4">
               <Input
                 value={labelText}
                 onChange={e => setLabelText(e.target.value.slice(0, 20))}
-                placeholder="Scan to discover"
+                placeholder={t("Scan to discover")}
                 maxLength={20}
               />
               {/* Rich text toolbar — font, size, B/I/U, alignment. Every change
                   reflects live in the preview on the right. */}
               {canCustomDesign && (
-              <div className="rte-bar" role="toolbar" aria-label="Label formatting">
+              <div className="rte-bar" role="toolbar" aria-label={t("Label formatting")}>
                 <select
                   className="rte-select"
                   value={labelFont}
                   onChange={e => setLabelFont(e.target.value)}
-                  title="Font"
+                  title={t("Font")}
                   style={{
                     fontFamily: labelFontSpec.family,
                     fontWeight: labelFontSpec.weight,
@@ -1651,7 +1775,7 @@ export default function CreateQr() {
                   className="rte-select"
                   value={labelFontSize}
                   onChange={e => setLabelFontSize(Number(e.target.value))}
-                  title="Size"
+                  title={t("Size")}
                   style={{ minWidth: 64 }}
                 >
                   {[10, 12, 14, 16, 18, 20, 24, 28, 32].map(s => (
@@ -1665,21 +1789,21 @@ export default function CreateQr() {
                   <button type="button"
                     className={`rte-btn ${labelBold ? "active" : ""}`}
                     aria-pressed={labelBold}
-                    title="Bold"
+                    title={t("Bold")}
                     onClick={() => setLabelBold(v => !v)}>
                     <Icon name="bold" size={14} />
                   </button>
                   <button type="button"
                     className={`rte-btn ${labelItalic ? "active" : ""}`}
                     aria-pressed={labelItalic}
-                    title="Italic"
+                    title={t("Italic")}
                     onClick={() => setLabelItalic(v => !v)}>
                     <Icon name="italic" size={14} />
                   </button>
                   <button type="button"
                     className={`rte-btn ${labelUnderline ? "active" : ""}`}
                     aria-pressed={labelUnderline}
-                    title="Underline"
+                    title={t("Underline")}
                     onClick={() => setLabelUnderline(v => !v)}>
                     <Icon name="underline" size={14} />
                   </button>
@@ -1687,25 +1811,25 @@ export default function CreateQr() {
 
                 <div className="rte-sep" />
 
-                <div className="rte-group" role="radiogroup" aria-label="Text alignment">
+                <div className="rte-group" role="radiogroup" aria-label={t("Text alignment")}>
                   <button type="button"
                     className={`rte-btn ${labelAlign === "left" ? "active" : ""}`}
                     aria-pressed={labelAlign === "left"}
-                    title="Align left"
+                    title={t("Align left")}
                     onClick={() => setLabelAlign("left")}>
                     <Icon name="align-left" size={14} />
                   </button>
                   <button type="button"
                     className={`rte-btn ${labelAlign === "center" ? "active" : ""}`}
                     aria-pressed={labelAlign === "center"}
-                    title="Align center"
+                    title={t("Align center")}
                     onClick={() => setLabelAlign("center")}>
                     <Icon name="align-center" size={14} />
                   </button>
                   <button type="button"
                     className={`rte-btn ${labelAlign === "right" ? "active" : ""}`}
                     aria-pressed={labelAlign === "right"}
-                    title="Align right"
+                    title={t("Align right")}
                     onClick={() => setLabelAlign("right")}>
                     <Icon name="align-right" size={14} />
                   </button>
@@ -1714,13 +1838,13 @@ export default function CreateQr() {
               )}
             </Field>
 
-            <Field label="Position" hint="Where the text sits relative to the QR." className="mt-4">
+            <Field label={t("Position")} hint={t("Where the text sits relative to the QR.")} className="mt-4">
               <div className="pos-picker">
                 {LABEL_POSITIONS.map(p => (
-                  <div key={p} className={`style-opt pos-opt ${labelPos === p ? "active" : ""}`} onClick={() => setLabelPos(p)}>
+                  <button type="button" key={p} className={`style-opt pos-opt ${labelPos === p ? "active" : ""}`} aria-pressed={labelPos === p} onClick={() => setLabelPos(p)}>
                     <div className="pos-opt-illus"><PositionMini pos={p} /></div>
-                    <div className="style-opt-label">{p === "none" ? "Off" : p}</div>
-                  </div>
+                    <div className="style-opt-label">{p === "none" ? t("Off") : p}</div>
+                  </button>
                 ))}
               </div>
             </Field>
@@ -1729,8 +1853,8 @@ export default function CreateQr() {
               <div className="mt-4">
                 <FeatureLock
                   compact
-                  title="Fonts, formatting & frames"
-                  desc={`Pick a font, size, bold / italic, and add a decorative frame around the QR on ${designPlan}.`}
+                  title={t("Fonts, formatting & frames")}
+                  desc={t("Pick a font, size, bold / italic, and add a decorative frame around the QR on {designPlan}.", { designPlan })}
                   plan={designPlan}
                 />
               </div>
@@ -1738,25 +1862,26 @@ export default function CreateQr() {
 
             {canCustomDesign && (
             <Field
-              label="Frame style"
+              label={t("Frame style")}
               hint={
                 labelPos === "none"
-                  ? "Decorative outline around the QR. Pick a label position to unlock frames with text zones."
-                  : `Frames with a text zone on the ${labelPos} — adapts to your label.`
+                  ? t("Decorative outline around the QR. Pick a label position to unlock frames with text zones.")
+                  : t("Frames with a text zone on the {labelPos} — adapts to your label.", { labelPos: t(labelPos) })
               }
               className="mt-4"
             >
               <div className="style-picker" style={{ gridTemplateColumns: "repeat(4, 1fr)", gap: 8 }}>
                 {availableFrames.map(fs => (
-                  <div key={fs}
+                  <button type="button" key={fs}
                     className={`style-opt ${frameStyle === fs ? "active" : ""}`}
+                    aria-pressed={frameStyle === fs}
                     onClick={() => setFrameStyle(fs)}
                     title={FRAME_LABEL[fs]}>
                     <div className="style-opt-illus" style={{ width: 56, height: 40, display: "grid", placeItems: "center" }}>
                       <FrameMini style={fs} labelPos={labelPos} />
                     </div>
                     <div className="style-opt-label" style={{ textTransform: "capitalize" }}>{FRAME_LABEL[fs]}</div>
-                  </div>
+                  </button>
                 ))}
               </div>
             </Field>
@@ -1764,12 +1889,12 @@ export default function CreateQr() {
 
             {hasTextZone && (
               <div className="grid grid-2 mt-4">
-                <Field label="Label text color" hint="Color of the text inside the frame's text zone.">
+                <Field label={t("Label text color")} hint={t("Color of the text inside the frame's text zone.")}>
                   <div className="swatch-row">
                     {QR_COLORS.map(c => (
-                      <div key={c} className={`swatch ${labelTextColor === c ? "active" : ""}`} style={{ background: c }} onClick={() => setLabelTextColor(c)} />
+                      <button type="button" key={c} className={`swatch ${labelTextColor === c ? "active" : ""}`} style={{ background: c }} aria-label={t("Color {c}", { c })} aria-pressed={labelTextColor === c} onClick={() => setLabelTextColor(c)} />
                     ))}
-                    <label className={`swatch swatch-picker ${!QR_COLORS.includes(labelTextColor) ? "active" : ""}`} title="Custom color">
+                    <label className={`swatch swatch-picker ${!QR_COLORS.includes(labelTextColor) ? "active" : ""}`} title={t("Custom color")}>
                       <input type="color" value={labelTextColor} onChange={e => setLabelTextColor(e.target.value)} />
                       <span className="picker-icon"><Icon name="edit" size={11} /></span>
                     </label>
@@ -1781,15 +1906,15 @@ export default function CreateQr() {
                     </div>
                   )}
                 </Field>
-                <Field label="Text zone background" hint="Fill color of the band behind the label.">
+                <Field label={t("Text zone background")} hint={t("Fill color of the band behind the label.")}>
                   <div className="swatch-row">
                     {QR_COLORS.map(c => (
-                      <div key={c} className={`swatch ${labelBgColor === c ? "active" : ""}`} style={{ background: c }} onClick={() => setLabelBgColor(c)} />
+                      <button type="button" key={c} className={`swatch ${labelBgColor === c ? "active" : ""}`} style={{ background: c }} aria-label={t("Color {c}", { c })} aria-pressed={labelBgColor === c} onClick={() => setLabelBgColor(c)} />
                     ))}
                     {QR_BG_COLORS.map(c => (
-                      <div key={`bg-${c}`} className={`swatch ${labelBgColor === c ? "active" : ""}`} style={{ background: c }} onClick={() => setLabelBgColor(c)} />
+                      <button type="button" key={`bg-${c}`} className={`swatch ${labelBgColor === c ? "active" : ""}`} style={{ background: c }} aria-label={t("Color {c}", { c })} aria-pressed={labelBgColor === c} onClick={() => setLabelBgColor(c)} />
                     ))}
-                    <label className={`swatch swatch-picker ${![...QR_COLORS, ...QR_BG_COLORS].includes(labelBgColor) ? "active" : ""}`} title="Custom color">
+                    <label className={`swatch swatch-picker ${![...QR_COLORS, ...QR_BG_COLORS].includes(labelBgColor) ? "active" : ""}`} title={t("Custom color")}>
                       <input type="color" value={labelBgColor} onChange={e => setLabelBgColor(e.target.value)} />
                       <span className="picker-icon"><Icon name="edit" size={11} /></span>
                     </label>
@@ -1807,20 +1932,20 @@ export default function CreateQr() {
 
           {/* Tracking */}
           <Card className="card-pad-lg">
-            <div className="section-h" style={{ fontSize: 15, marginBottom: 4 }}>Tracking</div>
-            <div className="section-sub">UTM parameters appended to scan redirects automatically — surface QR traffic in Google Analytics, Shopify Analytics, Klaviyo, etc.</div>
+            <div className="section-h" style={{ fontSize: 15, marginBottom: 4 }}>{t("Tracking")}</div>
+            <div className="section-sub">{t("UTM parameters appended to scan redirects automatically — surface QR traffic in Google Analytics, Shopify Analytics, Klaviyo, etc.")}</div>
             <div className="grid grid-2 mt-4">
-              <Field label="UTM campaign" hint="The campaign / promotion name. Example: summer-drop-2026.">
-                <Input placeholder="summer-drop-2026" value={utmCampaign} onChange={e => setUtmCampaign(e.target.value)} />
+              <Field label={t("UTM campaign")} hint={t("The campaign / promotion name. Example: summer-drop-2026.")}>
+                <Input placeholder={t("summer-drop-2026")} value={utmCampaign} onChange={e => setUtmCampaign(e.target.value)} />
               </Field>
-              <Field label="UTM source" hint="The physical/digital placement. Example: qr-flyer, in-store, packaging.">
-                <Input placeholder="qr-flyer" value={utmSource} onChange={e => setUtmSource(e.target.value)} />
+              <Field label={t("UTM source")} hint={t("The physical/digital placement. Example: qr-flyer, in-store, packaging.")}>
+                <Input placeholder={t("qr-flyer")} value={utmSource} onChange={e => setUtmSource(e.target.value)} />
               </Field>
-              <Field label="UTM medium" hint="The marketing channel. Defaults to 'qr' so all your QR traffic groups together in analytics.">
-                <Input placeholder="qr" value={utmMedium} onChange={e => setUtmMedium(e.target.value)} />
+              <Field label={t("UTM medium")} hint={t("The marketing channel. Defaults to 'qr' so all your QR traffic groups together in analytics.")}>
+                <Input placeholder={t("qr")} value={utmMedium} onChange={e => setUtmMedium(e.target.value)} />
               </Field>
-              <Field label="UTM term" hint="Optional. Identifies the QR placement or variant — e.g. 'storefront-window', 'flyer-v2'.">
-                <Input placeholder="storefront-window" value={utmTerm} onChange={e => setUtmTerm(e.target.value)} />
+              <Field label={t("UTM term")} hint={t("Optional. Identifies the QR placement or variant — e.g. 'storefront-window', 'flyer-v2'.")}>
+                <Input placeholder={t("storefront-window")} value={utmTerm} onChange={e => setUtmTerm(e.target.value)} />
               </Field>
             </div>
           </Card>
@@ -1829,8 +1954,8 @@ export default function CreateQr() {
           <Card className="card-pad-lg">
             <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12 }}>
               <div>
-                <div className="section-h" style={{ fontSize: 15, marginBottom: 4 }}>Schedule &amp; campaign</div>
-                <div className="section-sub">Schedule when the QR activates / expires, and choose the Campaign page this QR should open.</div>
+                <div className="section-h" style={{ fontSize: 15, marginBottom: 4 }}>{t("Schedule & campaign")}</div>
+                <div className="section-sub">{t("Schedule when the QR activates / expires, and choose the Campaign page this QR should open.")}</div>
               </div>
               <button
                 type="button"
@@ -1847,7 +1972,7 @@ export default function CreateQr() {
                   cursor: "pointer",
                   flex: "0 0 auto",
                 }}
-                title={scheduleEnabled ? "Disable schedule" : "Enable schedule"}
+                title={scheduleEnabled ? t("Disable schedule") : t("Enable schedule")}
               >
                 <span style={{
                   display: "block",
@@ -1864,7 +1989,7 @@ export default function CreateQr() {
 
             {scheduleEnabled && (
               <div className="grid grid-2 mt-4">
-                <Field label="Activates at" hint="Required when schedule is enabled." required>
+                <Field label={t("Activates at")} hint={t("Required when schedule is enabled.")} required>
                   <input
                     type="datetime-local"
                     className="filter-select"
@@ -1883,7 +2008,7 @@ export default function CreateQr() {
                     }}
                   />
                 </Field>
-                <Field label="Expires at" hint="Required when schedule is enabled." required>
+                <Field label={t("Expires at")} hint={t("Required when schedule is enabled.")} required>
                   <input
                     type="datetime-local"
                     className="filter-select"
@@ -1906,7 +2031,7 @@ export default function CreateQr() {
             )}
 
             {campaigns.length > 0 && (
-              <Field label="Campaign page" hint="Scans land on the selected Campaign. Draft and paused campaigns can still be previewed before activation." className="mt-4">
+              <Field label={t("Campaign page")} hint={t("Scans land on the selected Campaign. Draft and paused campaigns can still be previewed before activation.")} className="mt-4">
                 <select
                   className="filter-select"
                   value={campaignId}
@@ -1923,7 +2048,7 @@ export default function CreateQr() {
                     cursor: "pointer",
                   }}
                 >
-                  <option value="">— No campaign —</option>
+                  <option value="">{t("— No campaign —")}</option>
                   {campaigns.map(c => (
                     <option key={c.id} value={c.id} disabled={c.status === "ENDED"}>
                       {c.name} {c.status !== "ACTIVE" ? `(${c.status.toLowerCase()})` : ""}
@@ -1932,15 +2057,42 @@ export default function CreateQr() {
                 </select>
               </Field>
             )}
+
+            <div className="advanced-divider" />
+            <div className="strong" style={{ fontSize: 13 }}>{t("When this QR code can't open its destination")}</div>
+            <div className="text-xs muted" style={{ marginTop: 2 }}>
+              {t("Paused, not active yet, expired or over your plan limit: scans never hit an error page. They go to the page below and appear as missed scans in your stats.")}
+            </div>
+            {plan.customFallback ? (
+              <Field label={t("Fallback page")} hint={defaultFallback ? t("Leave empty to use your default ({defaultFallback}).", { defaultFallback }) : t("Leave empty to use your store home page. Tip: set an expiry date above and a fallback here to switch destination automatically.")} className="mt-3">
+                <Input icon="link" placeholder={defaultFallback ?? `https://${shopDomain}/`} value={fallbackUrl} onChange={e => setFallbackUrl(e.target.value)} />
+              </Field>
+            ) : (
+              <div className="mt-3">
+                <FeatureLock
+                  compact
+                  title={t("Scans go to your store home page ({shopDomain})", { shopDomain })}
+                  desc={t("Choose your own fallback page — and switch destination automatically after an expiry date — from the Starter plan.")}
+                  plan="Starter"
+                />
+              </div>
+            )}
           </Card>
+
+          <SmartRoutingCard
+            value={routing}
+            onChange={setRouting}
+            locked={!plan.smartRouting}
+            timezone={timezone}
+          />
         </div>
 
         {/* ══ RIGHT — Sticky preview ══ */}
         <div style={{ position: "sticky", top: 28 }}>
           <Card className="card-pad-lg" accent={activated ? "green" : "blue"}>
             <div className="flex items-center justify-between mb-4">
-              <div className="strong" style={{ fontSize: 13.5 }}>Live preview</div>
-              <Badge tone={activated ? "success" : "neutral"} dot>{activated ? "Active" : savedQr ? "Saved draft" : "Unsaved"}</Badge>
+              <div className="strong" style={{ fontSize: 13.5 }}>{t("Live preview")}</div>
+              <Badge tone={activated ? "success" : "neutral"} dot>{activated ? t("Active") : savedQr ? t("Saved draft") : t("Unsaved")}</Badge>
             </div>
 
             <div
@@ -1958,12 +2110,11 @@ export default function CreateQr() {
               {!valid ? (
                 <div style={{ width: 248, height: 248, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 8, background: eff.bg, color: "var(--fg-subtle)", fontSize: 11.5, textAlign: "center", padding: 16, borderRadius: 12 }}>
                   <Icon name="qr-code" size={28} />
-                  <div>Name your QR code<br />to preview it.</div>
+                  <div>{t("Name your QR code")}<br />{t("to preview it.")}</div>
                 </div>
               ) : (
                 <>
                   <QrSvg
-                    key={renderToken}
                     text={previewText}
                     size={220}
                     fg={eff.fg}
@@ -1977,16 +2128,12 @@ export default function CreateQr() {
                     gradient={eff.gradient}
                     label={previewLabel}
                   />
-                  <div className={`qr-loading-overlay ${generating ? "active" : ""}`}>
-                    <div className="qr-loading-spinner" />
-                    <div className="qr-loading-text">Generating…</div>
-                  </div>
                 </>
               )}
             </div>
 
             <div className="text-sm muted mt-4">
-              Destination: <span className="strong">{tm.name}</span>
+              {t("Destination:")} <span className="strong">{t(meta.name)}</span>
               {selectedLabel && (
                 <div style={{ fontSize: 12, marginTop: 6, color: "var(--fg-strong)" }}>{selectedLabel}</div>
               )}
@@ -2007,7 +2154,7 @@ export default function CreateQr() {
                   onClick={() => submitQr("save")}
                   style={{ width: "100%" }}
                 >
-                  {submitting && submitMode === "save" ? "Saving…" : "Save"}
+                  {submitting && submitMode === "save" ? t("Saving…") : t("Save")}
                 </Button>
                 <Button
                   variant="secondary"
@@ -2017,7 +2164,7 @@ export default function CreateQr() {
                   onClick={() => submitQr("saveExit")}
                   style={{ width: "100%" }}
                 >
-                  {submitting && submitMode === "saveExit" ? "Saving…" : "Save & exit"}
+                  {submitting && submitMode === "saveExit" ? t("Saving…") : t("Save & exit")}
                 </Button>
               </div>
 
@@ -2026,27 +2173,27 @@ export default function CreateQr() {
                 size="lg"
                 icon={activated ? "circle-check" : "zap"}
                 disabled={submitting || !savedQr || activated}
-                title={!savedQr ? "Save this QR code before activating it" : activated ? "QR code is already active" : "Activate QR code"}
+                title={!savedQr ? t("Save this QR code before activating it") : activated ? t("QR code is already active") : t("Activate QR code")}
                 onClick={() => submitQr("activate")}
                 style={{ width: "100%" }}
               >
-                {submitting && submitMode === "activate" ? "Activating…" : activated ? "Active" : "Activate"}
+                {submitting && submitMode === "activate" ? t("Activating…") : activated ? t("Active") : t("Activate")}
               </Button>
 
               <div className="text-xs muted" style={{ textAlign: "center" }}>
-                {!savedQr ? "Save first to unlock activation and downloads." : activated ? "Changes can still be saved while this QR stays active." : "Saved drafts can be activated here or from My QR codes."}
+                {!savedQr ? t("Save first to unlock activation and downloads.") : activated ? t("Changes can still be saved while this QR stays active.") : t("Saved drafts can be activated here or from My QR codes.")}
               </div>
 
 
-              <div className="strong mt-2" style={{ fontSize: 12 }}>Scan URL</div>
+              <div className="strong mt-2" style={{ fontSize: 12 }}>{t("Scan URL")}</div>
               <div style={{ fontFamily: "var(--ff-mono)", fontSize: 11, padding: "8px 10px", background: "var(--bg-sunken)", border: "1px solid var(--border)", borderRadius: 6, display: "flex", alignItems: "center", gap: 8 }}>
                 <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: savedQr ? "var(--fg-strong)" : "var(--fg-muted)" }}>
-                  {savedQr ? previewText : "Save first to generate a scan URL"}
+                  {savedQr ? previewText : t("Save first to generate a scan URL")}
                 </span>
                 <Button size="sm" variant="ghost" disabled={!savedQr} onClick={() => {
                   if (!savedQr) return;
                   navigator.clipboard?.writeText(previewText);
-                  toast({ title: "Link copied", type: "info" });
+                  toast({ title: t("Link copied"), type: "info" });
                 }}>
                   <Icon name="copy" size={12} />
                 </Button>
@@ -2062,7 +2209,7 @@ export default function CreateQr() {
                       variant="secondary"
                       icon={locked ? "lock" : "download"}
                       disabled={!savedQr || downloading === format}
-                      title={!savedQr ? "Save this QR code before downloading it" : locked ? `${format.toUpperCase()} requires the ${exportPlan} plan` : `Download ${format.toUpperCase()}`}
+                      title={!savedQr ? t("Save this QR code before downloading it") : locked ? t("{format} requires the {exportPlan} plan", { format: format.toUpperCase(), exportPlan }) : t("Download {format}", { format: format.toUpperCase() })}
                       onClick={() => handleDownload(format)}
                       style={{ width: "100%", ...(locked ? { opacity: 0.7 } : {}) }}
                     >
@@ -2073,20 +2220,20 @@ export default function CreateQr() {
               </div>
               {!canExport && (
                 <div className="text-xs muted" style={{ textAlign: "center" }}>
-                  SVG and PDF files are included from the {exportPlan} plan.
+                  {t("SVG and PDF files are included from the {plan} plan.", { plan: exportPlan })}
                 </div>
               )}
 
               <Button size="md" variant="primary" icon="eye"
                 style={{ marginTop: 4 }}
                 onClick={() => navigate("/app/qr-manager")}>
-                Go to My QR codes
+                {t("Go to My QR codes")}
               </Button>
             </div>
           </Card>
 
           <div className="text-xs muted mt-4" style={{ textAlign: "center", padding: "0 12px" }}>
-            TrackQr tracks every scan, device and conversion through a unique short URL.
+            {t("TrackQr tracks every scan, device and conversion through a unique short URL.")}
           </div>
         </div>
       </div>

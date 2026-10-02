@@ -6,6 +6,7 @@ import {
   siGmail, siApplemusic, siWechat, siMessenger, siSignal,
 } from "simple-icons";
 import { Icon } from "./Icon";
+import { t, tm } from "../../lib/i18n";
 
 /* ──────────────────────────────────────────────────────────────────
  * Brand center logos for QR codes. Sourced from `simple-icons` —
@@ -166,7 +167,7 @@ export function LogoPicker({ value, onChange }: {
           type="button"
           onClick={() => onChange({ kind: "none" })}
           className={`logo-tile ${isNone ? "active" : ""}`}
-          title="No logo"
+          title={t("No logo")}
           style={tileStyle(isNone)}
         >
           <Icon name="x" size={16} style={{ color: "var(--fg-subtle)" }} />
@@ -195,10 +196,10 @@ export function LogoPicker({ value, onChange }: {
             type="button"
             onClick={triggerUpload}
             className="logo-tile active"
-            title="Replace custom logo"
+            title={t("Replace custom logo")}
             style={tileStyle(true)}
           >
-            <img src={value.customPreviewUrl || value.customUrl} alt="Custom" width={28} height={28} style={{ display: "block", objectFit: "contain" }} />
+            <img src={value.customPreviewUrl || value.customUrl} alt={t("Custom")} width={28} height={28} style={{ display: "block", objectFit: "contain" }} />
           </button>
         ) : (
           <button
@@ -206,7 +207,7 @@ export function LogoPicker({ value, onChange }: {
             onClick={triggerUpload}
             disabled={uploading}
             className="logo-tile"
-            title="Upload custom logo"
+            title={t("Upload custom logo")}
             style={{ ...tileStyle(false), borderStyle: "dashed", opacity: uploading ? 0.6 : 1 }}
           >
             {uploading
@@ -225,13 +226,13 @@ export function LogoPicker({ value, onChange }: {
       </div>
 
       {error && (
-        <div style={{ marginTop: 8, fontSize: 11, color: "var(--red-fg)" }}>{error}</div>
+        <div style={{ marginTop: 8, fontSize: 11, color: "var(--red-fg)" }}>{tm(error)}</div>
       )}
 
       <div style={{ marginTop: 8, fontSize: 11, color: "var(--fg-muted)", fontFamily: "var(--ff-mono)" }}>
-        {value.kind === "brand"  && <>Selected: <b>{BRAND_LOGOS.find(l => l.id === value.brandId)?.name ?? value.brandId}</b></>}
-        {value.kind === "custom" && <>Selected: <b>Custom upload</b> · max 2 MB · PNG/JPG/SVG/WebP/GIF</>}
-        {value.kind === "none"   && <>No center logo</>}
+        {value.kind === "brand"  && <>{t("Selected:")} <b>{BRAND_LOGOS.find(l => l.id === value.brandId)?.name ?? value.brandId}</b></>}
+        {value.kind === "custom" && <>{t("Selected:")} <b>{t("Custom upload")}</b> · {t("max 2 MB")} · PNG/JPG/SVG/WebP/GIF</>}
+        {value.kind === "none"   && <>{t("No center logo")}</>}
       </div>
     </div>
   );

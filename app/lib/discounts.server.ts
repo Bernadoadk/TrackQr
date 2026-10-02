@@ -42,7 +42,7 @@ export async function createDiscountCode(
       code:  input.code,
       startsAt,
       ...(input.endsAt ? { endsAt: input.endsAt.toISOString() } : {}),
-      customerSelection: { all: true },
+      context: { all: "ALL" },
       // Shop-wide percentage discount on order subtotal.
       customerGets: {
         value: { percentage: input.percentage },

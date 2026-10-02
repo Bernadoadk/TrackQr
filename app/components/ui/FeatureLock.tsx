@@ -3,6 +3,7 @@ import { Link, useLocation } from "react-router";
 import { Icon } from "./Icon";
 import { Button } from "./Button";
 import { withEmbeddedParams } from "../../lib/embedded-params";
+import { t } from "../../lib/i18n";
 
 interface FeatureLockProps {
   /** What is locked, e.g. "Logo, colors & shapes". */
@@ -30,7 +31,7 @@ export function FeatureLock({ title, desc, plan, compact, children }: FeatureLoc
         {children}
       </div>
       <Link to={withEmbeddedParams("/app/pricing", location.search)} className="feature-lock-cta">
-        <Button variant="primary" size="sm" iconRight="arrow-right">Upgrade to {plan}</Button>
+        <Button variant="primary" size="sm" iconRight="arrow-right">{t("Upgrade to {plan}", { plan })}</Button>
       </Link>
     </div>
   );

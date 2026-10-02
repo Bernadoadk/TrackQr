@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
+import { t } from "../../lib/i18n";
 
 /* ── Types ── */
 export interface TweakValues {
@@ -187,7 +188,7 @@ export function TweaksPanel({ values, onChange }: TweaksPanelProps) {
     return (
       <>
         <style>{PANEL_CSS}</style>
-        <button className="twk-open-btn" onClick={() => setOpen(true)} title="Open tweaks panel" aria-label="Open tweaks">
+        <button className="twk-open-btn" onClick={() => setOpen(true)} title={t("Open tweaks panel")} aria-label={t("Open tweaks")}>
           <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
             <circle cx="8" cy="8" r="3"/>
             <path d="M8 1v2M8 13v2M1 8h2M13 8h2M3.22 3.22l1.42 1.42M11.36 11.36l1.42 1.42M11.36 4.64l-1.42 1.42M4.64 11.36l-1.42 1.42"/>
@@ -206,31 +207,32 @@ export function TweaksPanel({ values, onChange }: TweaksPanelProps) {
         style={{ right: offsetRef.current.x, bottom: offsetRef.current.y }}
       >
         {/* Header */}
-        <div className="twk-hd" onMouseDown={onDragStart}>
-          <b>Tweaks</b>
+        {/* Mouse-only drag handle: the panel stays fully usable from the keyboard without it. */}
+        <div className="twk-hd" role="presentation" onMouseDown={onDragStart}>
+          <b>{t("Tweaks")}</b>
           <button className="twk-x" onMouseDown={e => e.stopPropagation()} onClick={() => setOpen(false)}>✕</button>
         </div>
 
         <div className="twk-body">
           {/* Theme */}
-          <div className="twk-sect">Theme</div>
+          <div className="twk-sect">{t("Theme")}</div>
 
           <div className="twk-row twk-row-h">
-            <div className="twk-lbl">Dark mode</div>
+            <div className="twk-lbl">{t("Dark mode")}</div>
             <button
               className="twk-toggle"
               data-on={values.theme === "dark" ? "1" : "0"}
               onClick={() => onChange("theme", values.theme === "dark" ? "light" : "dark")}
-              aria-label="Toggle dark mode"
+              aria-label={t("Toggle dark mode")}
             >
               <i />
             </button>
           </div>
 
           {/* Accent color */}
-          <div className="twk-sect">Accent</div>
+          <div className="twk-sect">{t("Accent")}</div>
           <div className="twk-row">
-            <div className="twk-lbl">Color</div>
+            <div className="twk-lbl">{t("Color")}</div>
             <div className="twk-chips">
               {ACCENT_PRESETS.map(p => (
                 <button
@@ -239,8 +241,8 @@ export function TweaksPanel({ values, onChange }: TweaksPanelProps) {
                   data-on={values.accent === p.value ? "1" : "0"}
                   onClick={() => onChange("accent", p.value)}
                   style={{ background: p.value }}
-                  title={p.name}
-                  aria-label={p.name}
+                  title={t(p.name)}
+                  aria-label={t(p.name)}
                 >
                   {values.accent === p.value && (
                     <div className="twk-chip-check">
@@ -262,9 +264,9 @@ export function TweaksPanel({ values, onChange }: TweaksPanelProps) {
           </div>
 
           {/* Density */}
-          <div className="twk-sect">Layout</div>
+          <div className="twk-sect">{t("Layout")}</div>
           <div className="twk-row">
-            <div className="twk-lbl">Density</div>
+            <div className="twk-lbl">{t("Density")}</div>
             <div className="twk-seg">
               <div
                 className="twk-seg-thumb"
@@ -282,12 +284,12 @@ export function TweaksPanel({ values, onChange }: TweaksPanelProps) {
           </div>
 
           <div className="twk-row twk-row-h">
-            <div className="twk-lbl">Collapse sidebar</div>
+            <div className="twk-lbl">{t("Collapse sidebar")}</div>
             <button
               className="twk-toggle"
               data-on={values.sidebarCollapsed ? "1" : "0"}
               onClick={() => onChange("sidebarCollapsed", !values.sidebarCollapsed)}
-              aria-label="Toggle sidebar"
+              aria-label={t("Toggle sidebar")}
             >
               <i />
             </button>

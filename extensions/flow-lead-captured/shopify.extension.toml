@@ -1,0 +1,30 @@
+# Shopify Flow trigger — fired by app/lib/leads.server.ts (Growth plan).
+# Payload keys must match the field keys below exactly (see app/lib/flow.server.ts).
+[[extensions]]
+name = "Campaign lead captured"
+type = "flow_trigger"
+handle = "trackqr-lead-captured"
+uid = "25476143-c4d8-cb11-f618-efe0c7d9fb6b2be7b13c"
+description = "Runs when a visitor leaves their email on a TrackQr campaign page."
+
+[settings]
+
+  [[settings.fields]]
+  type = "email"
+  key = "Email"
+  description = "Email address the visitor submitted."
+
+  [[settings.fields]]
+  type = "single_line_text_field"
+  key = "Campaign name"
+  description = "Name of the TrackQr campaign page."
+
+  [[settings.fields]]
+  type = "boolean"
+  key = "Marketing consent"
+  description = "True when the visitor ticked the marketing consent box."
+
+  [[settings.fields]]
+  type = "single_line_text_field"
+  key = "Reward code"
+  description = "Unique discount code given to the visitor (empty when the block has no reward)."

@@ -1,55 +1,83 @@
 import type { LoaderFunctionArgs, ActionFunctionArgs } from "react-router";
-import { useLoaderData, useFetcher } from "react-router";
-import type { CSSProperties, ReactNode } from "react";
+import { redirect, useLoaderData, useFetcher } from "react-router";
+import { useCallback, useEffect, type CSSProperties, type ReactNode } from "react";
 import { siFacebook, siInstagram, siTiktok, siX } from "simple-icons";
 import { renderQrSvg } from "../lib/qr-render";
 import { LABEL_FONTS, DEFAULT_FONT, getLabelFont } from "../lib/label-fonts";
 import { normalizeCampaignPageSettings, type CampaignPageSettings } from "../lib/campaign-settings";
+import { safeCssUrl, safeImageUrl, safeLinkUrl, safeMediaUrl } from "../lib/url-safety";
+import { withScanAttribution } from "../lib/attribution-links";
+import { CAMPAIGN_COPY, isCampaignLang, pickCampaignLang, type CampaignCopy } from "../lib/campaign-copy";
+
+type CampaignBlockData = { id?: string; type: string; props: Record<string, unknown>; layout?: { padding: string; align: string; bg: string }; visibility?: { mobile: boolean; desktop: boolean } };
 
 type CampaignLandingData = {
   name: string;
   slug: string;
   isPreview: boolean;
+  lang?: string;
   status: string;
   shopDomain: string;
+  storeHosts: string[];
+  attribution: { scanId: string; qrSlug: string } | null;
+  rewardsEnabled: boolean;
   settings: CampaignPageSettings;
-  blocks: Array<{ id?: string; type: string; props: Record<string, unknown>; layout?: { padding: string; align: string; bg: string }; visibility?: { mobile: boolean; desktop: boolean } }>;
+  blocks: CampaignBlockData[];
   qrById: Record<string, PublicQr>;
 };
 
+/** Where the "Powered by TrackQR" badge leads (App Store listing, tagged). */
+const TRACKQR_LISTING_URL = "https://apps.shopify.com/trackqr?utm_source=trackqr&utm_medium=campaign-page&utm_campaign=powered-by";
+
 export const loader = async ({ request, params }: LoaderFunctionArgs) => {
   if (!params.slug) throw new Response("Not found", { status: 404 });
-  const { getCampaignBySlug, pauseCampaignForQuota } = await import("../lib/campaign.server");
-  const { getBillingAccess, isOverQuota } = await import("../lib/plan.server");
+  const [
+    { getCampaignBySlug, pauseCampaignForQuota, campaignPublicState, endCampaignIfExpired, recordCampaignView },
+    { getBillingAccess, isOverQuota, entitlementsForPlan },
+    { campaignLandingData, parseAttributionParams },
+    { parseRequest },
+  ] = await Promise.all([
+    import("../lib/campaign.server"),
+    import("../lib/plan.server"),
+    import("../lib/campaign-landing.server"),
+    import("../lib/tracking.server"),
+  ]);
   const campaign = await getCampaignBySlug(params.slug);
   if (!campaign) throw new Response("Not found", { status: 404 });
+  const url = new URL(request.url);
   const access = await getBillingAccess(campaign.shop);
-  const canPreview = new URL(request.url).searchParams.get("preview") === "1"
+  const entitlements = entitlementsForPlan(access.plan, access.status);
+  const canPreview = url.searchParams.get("preview") === "1"
     ? await canPreviewCampaign(request, campaign.shopId)
     : false;
+  const storeHome = `https://${campaign.shop.domain}/`;
 
-  // Plan quota gate — a campaign beyond the store's plan limit is paused here
-  // even if no admin page was opened since the downgrade.
-  if (!canPreview && await isOverQuota("campaigns", campaign, access.plan.campaignLimit)) {
-    await pauseCampaignForQuota(campaign.id);
-    throw new Response("This campaign is paused — the store's TrackQr plan limit was reached.", { status: 423 });
-  }
-  if (campaign.status === "DRAFT" && !canPreview) {
-    throw new Response("This campaign is not published yet.", { status: 423 });
-  }
-  if (campaign.status === "PAUSED" && !canPreview) {
-    throw new Response("This campaign is paused.", { status: 423 });
-  }
-  if (campaign.status === "ENDED" && !canPreview) {
-    throw new Response("This campaign has ended.", { status: 410 });
+  if (!canPreview) {
+    // Plan quota gate — a campaign beyond the store's plan limit is paused
+    // here even if no admin page was opened since the downgrade.
+    if (await isOverQuota("campaigns", campaign, access.plan.campaignLimit)) {
+      await pauseCampaignForQuota(campaign.id);
+      throw redirect(storeHome);
+    }
+    // Not published, paused, not started or ended: visitors land on the
+    // store instead of a dead end.
+    const state = campaignPublicState(campaign);
+    if (state === "ended") await endCampaignIfExpired(campaign);
+    if (state !== "live") throw redirect(storeHome);
+
+    const parsed = parseRequest(request);
+    if (!parsed.isBot) await recordCampaignView(campaign.id, parsed.sessionToken);
   }
 
-  const { campaignLandingData } = await import("../lib/campaign-landing.server");
   return campaignLandingData(campaign, {
     isPreview: canPreview,
-    customDesign: access.plan.customDesign,
+    customDesign: entitlements.customDesign,
     // The "Powered by TrackQr" watermark is only removable on a paid plan.
     forcePoweredBy: access.status !== "active",
+    pixels: entitlements.campaignPixels && !canPreview,
+    rewards: entitlements.leadRewards,
+    attribution: parseAttributionParams(url),
+    lang: pickCampaignLang(request.headers.get("accept-language")),
   });
 };
 
@@ -64,51 +92,57 @@ async function canPreviewCampaign(request: Request, shopId: string) {
 }
 
 export const action = async ({ request, params }: ActionFunctionArgs) => {
-  if (!params.slug) return { ok: false, error: "missing-slug" } as const;
-  const [{ getCampaignBySlug }, { captureLead }] = await Promise.all([
+  if (!params.slug) return { ok: false, error: "not-found" } as const;
+  const [{ getCampaignBySlug, pauseCampaignForQuota, campaignPublicState }, { captureLead }, { isOverQuota, resolvePlan }] = await Promise.all([
     import("../lib/campaign.server"),
     import("../lib/leads.server"),
+    import("../lib/plan.server"),
   ]);
   const campaign = await getCampaignBySlug(params.slug);
   if (!campaign) return { ok: false, error: "not-found" } as const;
-  if (campaign.status !== "ACTIVE") return { ok: false, error: "inactive" } as const;
-  const { isOverQuota, resolvePlan } = await import("../lib/plan.server");
+  if (campaignPublicState(campaign) !== "live") return { ok: false, error: "inactive" } as const;
   const plan = await resolvePlan(campaign.shop);
   if (await isOverQuota("campaigns", campaign, plan.campaignLimit)) {
-    const { pauseCampaignForQuota } = await import("../lib/campaign.server");
     await pauseCampaignForQuota(campaign.id);
     return { ok: false, error: "inactive" } as const;
   }
 
   const form = await request.formData();
-  const email = String(form.get("email") ?? "").trim();
   const blockId = String(form.get("blockId") ?? "");
+  const blocks = (campaign.blocks as CampaignBlockData[]) || [];
+  const sourceBlock = blocks.find(block => block.id === blockId && block.type === "capture");
+  const p = sourceBlock?.props ?? {};
+  const reserved = new Set(["email", "blockId", "consent", "company_website"]);
   const extra: Record<string, string> = {};
   for (const [k, v] of form.entries()) {
-    if (k === "email" || k === "blockId") continue;
-    extra[k] = String(v);
+    if (reserved.has(k) || typeof v !== "string") continue;
+    extra[k] = v;
   }
-  const blocks = (campaign.blocks as CampaignLandingData["blocks"]) || [];
-  const sourceBlock = blocks.find(block => block.id === blockId && block.type === "capture");
-  const sourceProps = sourceBlock?.props ?? {};
-  if (sourceBlock?.id) extra.blockId = sourceBlock.id;
-  if (sourceProps.title) extra.blockTitle = String(sourceProps.title);
 
-  try {
-    await captureLead({
-      campaign,
-      shopId: campaign.shopId,
-      email,
-      recipientEmail: String(sourceProps.merchantEmail || sourceProps.notifyEmail || ""),
-      mailSubject: String(sourceProps.mailSubject || ""),
-      extra,
-      sourceIp: request.headers.get("CF-Connecting-IP") ?? request.headers.get("X-Forwarded-For") ?? null,
-      sourceUa: request.headers.get("User-Agent") ?? null,
-    });
-    return { ok: true } as const;
-  } catch (err) {
-    return { ok: false, error: "save-failed", message: err instanceof Error ? err.message : "" } as const;
-  }
+  const result = await captureLead({
+    campaign,
+    email: String(form.get("email") ?? ""),
+    consent: form.get("consent") === "yes",
+    honeypot: String(form.get("company_website") ?? ""),
+    block: sourceBlock?.id
+      ? {
+          id: sourceBlock.id,
+          title: String(p.title ?? ""),
+          recipientEmail: String(p.merchantEmail || p.notifyEmail || "") || null,
+          mailSubject: String(p.mailSubject || "") || null,
+          reward: p.rewardEnabled === true
+            ? { enabled: true, percent: Number(p.rewardPercent) || 10, prefix: String(p.rewardPrefix || "TQR") }
+            : null,
+        }
+      : null,
+    extra,
+    ip: request.headers.get("CF-Connecting-IP")
+      ?? request.headers.get("X-Forwarded-For")?.split(",")[0]?.trim()
+      ?? request.headers.get("X-Real-IP")
+      ?? null,
+    userAgent: request.headers.get("User-Agent"),
+  });
+  return result;
 };
 
 /* ──────────── SSR rendering ──────────── */
@@ -211,7 +245,7 @@ function bgValue(value: unknown) {
 }
 function blockStyle(p: Record<string, unknown>, layout?: { padding?: string; align?: string; bg?: string }): CSSProperties {
   const pad = layout?.padding === "sm" ? 16 : layout?.padding === "lg" ? 44 : 28;
-  const bgImageUrl = typeof p.bgImageUrl === "string" && p.bgImageUrl ? p.bgImageUrl : "";
+  const bgImageUrl = safeCssUrl(p.bgImageUrl) ?? "";
   const overlay = Math.max(0, Math.min(0.9, numeric(p.bgOverlay, 0.25)));
   return {
     padding: `${pad}px clamp(18px, 4vw, 56px)`,
@@ -267,10 +301,31 @@ function cardInlineStyle(p: Record<string, unknown>): CSSProperties | undefined 
   if (border) style.borderColor = border;
   return Object.keys(style).length ? style : undefined;
 }
-function safeHref(value: unknown) {
-  const href = String(value || "").trim();
-  return href && href !== "https://" ? href : undefined;
+/** Rendering context shared by every block of a public campaign page. */
+interface PageContext {
+  shopDomain: string;
+  isPreview: boolean;
+  /** Interface text in the visitor's language. */
+  copy: CampaignCopy;
+  rewardsEnabled: boolean;
+  /** Sanitized link (http(s), mailto:, tel:, same-site path) decorated with the scan id for store URLs. */
+  link: (value: unknown) => string | undefined;
 }
+
+function makePageContext(data: CampaignLandingData): PageContext {
+  return {
+    shopDomain: data.shopDomain,
+    isPreview: data.isPreview,
+    copy: CAMPAIGN_COPY[isCampaignLang(data.lang) ? data.lang : "en"],
+    rewardsEnabled: data.rewardsEnabled,
+    link: (value: unknown) => {
+      const href = safeLinkUrl(value);
+      if (!href || !data.attribution) return href;
+      return withScanAttribution(href, data.attribution.scanId, data.attribution.qrSlug, data.storeHosts);
+    },
+  };
+}
+
 function shopifyResourceUrl(resource: { handle?: string; onlineStoreUrl?: string }, type: "products" | "collections", shopDomain: string) {
   if (resource.onlineStoreUrl) return resource.onlineStoreUrl;
   if (!resource.handle) return "#";
@@ -283,7 +338,7 @@ function videoSrc(value: unknown) {
   if (yt) return `https://www.youtube.com/embed/${yt[1]}`;
   const vimeo = raw.match(/vimeo\.com\/(\d+)/);
   if (vimeo) return `https://player.vimeo.com/video/${vimeo[1]}`;
-  return raw;
+  return safeMediaUrl(raw) ?? "";
 }
 function productSamples(count: number) {
   const names = ["Aurora Tee", "Stone Hoodie", "Drift Cap", "Pace Tote", "Linen Shirt", "Wool Beanie"];
@@ -300,15 +355,15 @@ function pageStyle(settingsInput: CampaignPageSettings): CSSProperties {
     "--tqr-page-text": text,
   } as CSSProperties;
 }
-function socialLinks(settings: CampaignPageSettings) {
+function socialLinks(settings: CampaignPageSettings, link: PageContext["link"], copy: CampaignCopy) {
   const links = [
     { key: "instagram", label: "Instagram", path: siInstagram.path, color: `#${siInstagram.hex}`, href: settings.instagramUrl },
     { key: "tiktok", label: "TikTok", path: siTiktok.path, color: `#${siTiktok.hex}`, href: settings.tiktokUrl },
     { key: "facebook", label: "Facebook", path: siFacebook.path, color: `#${siFacebook.hex}`, href: settings.facebookUrl },
     { key: "x", label: "X", path: siX.path, color: `#${siX.hex}`, href: settings.xUrl },
-    { key: "website", label: "Website", path: "M10.5 13.5a4.5 4.5 0 0 1 0-6.36l2.12-2.12a4.5 4.5 0 1 1 6.36 6.36l-1.06 1.06-1.41-1.41 1.06-1.06a2.5 2.5 0 0 0-3.54-3.54l-2.12 2.12a2.5 2.5 0 0 0 0 3.54l-1.41 1.41Zm3 3a4.5 4.5 0 0 1 0-6.36l1.06-1.06 1.41 1.41-1.06 1.06a2.5 2.5 0 0 0 3.54 3.54l2.12-2.12a2.5 2.5 0 0 0 0-3.54l1.41-1.41a4.5 4.5 0 0 1 0 6.36l-2.12 2.12a4.5 4.5 0 0 1-6.36 0Z", color: settings.socialIconColor || "currentColor", href: settings.websiteUrl },
+    { key: "website", label: copy.website, path: "M10.5 13.5a4.5 4.5 0 0 1 0-6.36l2.12-2.12a4.5 4.5 0 1 1 6.36 6.36l-1.06 1.06-1.41-1.41 1.06-1.06a2.5 2.5 0 0 0-3.54-3.54l-2.12 2.12a2.5 2.5 0 0 0 0 3.54l-1.41 1.41Zm3 3a4.5 4.5 0 0 1 0-6.36l1.06-1.06 1.41 1.41-1.06 1.06a2.5 2.5 0 0 0 3.54 3.54l2.12-2.12a2.5 2.5 0 0 0 0-3.54l1.41-1.41a4.5 4.5 0 0 1 0 6.36l-2.12 2.12a4.5 4.5 0 0 1-6.36 0Z", color: settings.socialIconColor || "currentColor", href: settings.websiteUrl },
   ]
-    .map(item => ({ ...item, href: safeHref(item.href) }))
+    .map(item => ({ ...item, href: link(item.href) }))
     .filter(item => item.href);
   return links as Array<{ key: string; label: string; path: string; color: string; href: string }>;
 }
@@ -331,26 +386,27 @@ function footerStyle(settings: CampaignPageSettings): CSSProperties {
   } as CSSProperties;
 }
 function CampaignBrandBar({ settings, fallbackName }: { settings: CampaignPageSettings; fallbackName: string }) {
-  if (!settings.logoImageUrl && !settings.logoText) return null;
+  const logo = safeImageUrl(settings.logoImageUrl);
+  if (!logo && !settings.logoText) return null;
   return (
     <div className="tqr-brand-bar" data-align={settings.logoPosition}>
       <div className="tqr-brand-lockup">
-        {settings.logoImageUrl ? <img src={settings.logoImageUrl} alt="" /> : null}
+        {logo ? <img src={logo} alt="" /> : null}
         <span>{settings.logoText || fallbackName}</span>
       </div>
     </div>
   );
 }
-function TrackQrWatermark() {
+function TrackQrWatermark({ copy }: { copy: CampaignCopy }) {
   return (
     <div className="tqr-powered">
       <img className="tqr-powered-logo" src="/TrackQr.png" alt="" />
-      <span>Powered by <a href="https://trackqr.app">TrackQR</a></span>
+      <span>{copy.poweredBy} <a href={TRACKQR_LISTING_URL} target="_blank" rel="noopener noreferrer">TrackQR</a></span>
     </div>
   );
 }
-function CampaignFooter({ settings }: { settings: CampaignPageSettings }) {
-  const links = socialLinks(settings);
+function CampaignFooter({ settings, link, copy }: { settings: CampaignPageSettings; link: PageContext["link"]; copy: CampaignCopy }) {
+  const links = socialLinks(settings, link, copy);
   const hasMerchantFooter = settings.footerEnabled && (settings.footerText || settings.creditText || links.length);
   if (!hasMerchantFooter && !settings.showPoweredBy) return null;
   return (
@@ -378,11 +434,11 @@ function CampaignFooter({ settings }: { settings: CampaignPageSettings }) {
           ) : null}
         </div>
       )}
-      {settings.showPoweredBy && <TrackQrWatermark />}
+      {settings.showPoweredBy && <TrackQrWatermark copy={copy} />}
     </footer>
   );
 }
-type PublicQr = { id: string; name: string; slug: string; scanUrl: string; design?: Record<string, unknown>; label?: Record<string, unknown> };
+type PublicQr = { name: string; scanUrl: string; design?: Record<string, unknown>; label?: Record<string, unknown> };
 type ShopifyPickedResource = { id: string; title: string; handle?: string; onlineStoreUrl?: string; image?: string; price?: string };
 function isPickedResource(value: unknown): value is ShopifyPickedResource {
   return !!value && typeof value === "object" && typeof (value as ShopifyPickedResource).id === "string" && typeof (value as ShopifyPickedResource).title === "string";
@@ -394,14 +450,98 @@ function pickedResource(value: unknown): ShopifyPickedResource | null {
   return isPickedResource(value) ? value : null;
 }
 
+type CaptureResult = { ok: true; rewardCode: string | null } | { ok: false; error: string; message?: string };
+
+const CAPTURE_ERRORS: Record<string, keyof CampaignCopy> = {
+  "invalid-email": "invalidEmail",
+  "too-many": "tooMany",
+  inactive: "inactive",
+};
+
+/** Email capture form — one fetcher per block so two forms never share a state. */
+function CaptureBlock({ block, ctx, onLead }: { block: CampaignBlockData; ctx: PageContext; onLead: () => void }) {
+  const fetcher = useFetcher<CaptureResult>();
+  const p = block.props ?? {};
+  const result = fetcher.data;
+  const consentEnabled = p.consentEnabled !== false;
+  const consentText = String(p.consentText || ctx.copy.consent.replace("{shop}", ctx.shopDomain.replace(".myshopify.com", "")));
+  const privacyUrl = safeLinkUrl(p.privacyUrl);
+  const succeeded = !!result && result.ok;
+
+  useEffect(() => {
+    if (succeeded) onLead();
+  }, [succeeded, onLead]);
+
+  const rewardCode = result && result.ok ? result.rewardCode : null;
+  const applyHref = rewardCode ? ctx.link(`https://${ctx.shopDomain}/discount/${encodeURIComponent(rewardCode)}`) : undefined;
+
+  return (
+    <div className="tqr-capture" style={{ background: cssColor(p, "capturePanelBgColor"), borderColor: cssColor(p, "capturePanelBorderColor") }}>
+      <h3 style={headingStyle(p, 22)}>{String(p.title ?? ctx.copy.getOnList)}</h3>
+      {!!p.subtitle && <p style={bodyStyle(p)}>{String(p.subtitle)}</p>}
+      {succeeded ? (
+        <div className="tqr-success-panel" role="status">
+          <div className="tqr-success">{String(p.successMessage || ctx.copy.thanks)}</div>
+          {rewardCode && (
+            <div className="tqr-reward">
+              <div className="tqr-reward-label">{ctx.copy.yourCode}</div>
+              <div className="tqr-promo tqr-reward-code">{rewardCode}</div>
+              {applyHref && <a className="tqr-btn primary" href={applyHref} style={buttonInlineStyle(p)}>{ctx.copy.applyShop}</a>}
+            </div>
+          )}
+        </div>
+      ) : (
+        <fetcher.Form method="post" className="tqr-capture-form">
+          <input type="hidden" name="blockId" value={String(block.id ?? "")} />
+          {/* Honeypot: hidden from people, filled by bots. */}
+          <div className="tqr-hp" aria-hidden="true">
+            <label>Company website <input type="text" name="company_website" tabIndex={-1} autoComplete="off" /></label>
+          </div>
+          <div className="tqr-capture-row">
+            <input
+              type="email"
+              name="email"
+              required
+              aria-label={ctx.copy.emailAddress}
+              placeholder={String(p.placeholder ?? "you@email.com")}
+              style={{
+                background: cssColor(p, "inputBgColor"),
+                color: cssColor(p, "inputTextColor"),
+                borderColor: cssColor(p, "inputBorderColor"),
+                "--placeholder-color": cssColor(p, "placeholderColor"),
+              } as CSSProperties}
+            />
+            <button type="submit" className="tqr-btn primary" disabled={ctx.isPreview || fetcher.state !== "idle"} style={buttonInlineStyle(p)}>
+              {fetcher.state !== "idle" ? "…" : String(p.cta || ctx.copy.notifyMe)}
+            </button>
+          </div>
+          {consentEnabled && (
+            <label className="tqr-consent">
+              <input type="checkbox" name="consent" value="yes" required={p.consentRequired === true} />
+              <span>
+                {consentText}
+                {privacyUrl && <> <a href={privacyUrl} target="_blank" rel="noopener noreferrer">{ctx.copy.privacyPolicy}</a></>}
+              </span>
+            </label>
+          )}
+          {ctx.isPreview && <div className="tqr-note">{ctx.copy.previewForm}</div>}
+          {result && !result.ok && (
+            <div className="tqr-error" role="alert">{ctx.copy[CAPTURE_ERRORS[result.error] ?? "genericError"]}</div>
+          )}
+        </fetcher.Form>
+      )}
+    </div>
+  );
+}
+
 function renderBlock(
-  b: { id?: string; type: string; props: Record<string, unknown>; layout?: { padding: string; align: string; bg: string }; visibility?: { mobile: boolean; desktop: boolean } },
-  slug: string,
-  shopDomain: string,
+  b: CampaignBlockData,
+  ctx: PageContext,
   qrById: Record<string, PublicQr>,
-  fetcher: ReturnType<typeof useFetcher>,
+  onLead: () => void,
 ) {
   const p = b.props ?? {};
+  const shopDomain = ctx.shopDomain;
   const sectionClass = [
     "tqr-section",
     b.visibility?.mobile === false ? "hide-mobile" : "",
@@ -419,12 +559,12 @@ function renderBlock(
           {!!p.eyebrow &&<div className="tqr-eyebrow" style={{ color: cssColor(p, "eyebrowColor"), ...textRoleStyle(p, "eyebrow") }}>{String(p.eyebrow)}</div>}
           <h1 style={headingStyle(p, 40)}>{String(p.title ?? "")}</h1>
           {!!p.subtitle &&<p style={bodyStyle(p, 17)}>{String(p.subtitle)}</p>}
-          {!!p.cta &&<a href={safeHref(p.ctaHref) ?? "#"} className={`tqr-btn ${String(p.ctaVariant ?? "primary")}`} style={buttonInlineStyle(p)}>{String(p.cta)} →</a>}
+          {!!p.cta &&<a href={ctx.link(p.ctaHref) ?? "#"} className={`tqr-btn ${String(p.ctaVariant ?? "primary")}`} style={buttonInlineStyle(p)}>{String(p.cta)} →</a>}
         </div>
       );
     case "timer": {
       const parts = countdownParts(p.endsAt || p.endsIn);
-      const labels = ["Days", "Hours", "Min", "Sec"];
+      const labels = [ctx.copy.days, ctx.copy.hours, ctx.copy.min, ctx.copy.sec];
       return wrap(
         <>
           {!!p.label &&<div className="tqr-eyebrow center" style={{ color: cssColor(p, "eyebrowColor"), ...textRoleStyle(p, "eyebrow") }}>{String(p.label)}</div>}
@@ -444,7 +584,7 @@ function renderBlock(
           <p style={bodyStyle(p)}>{String(p.title ?? "")}</p>
           {!!p.cta && (
             <a
-              href={safeHref(p.href) ?? (p.autoApply && p.code ? `https://${shopDomain}/discount/${encodeURIComponent(String(p.code))}` : "#")}
+              href={ctx.link(p.href) ?? (p.autoApply && p.code ? ctx.link(`https://${shopDomain}/discount/${encodeURIComponent(String(p.code))}`) : "#")}
               className="tqr-btn secondary"
               style={buttonInlineStyle(p)}
             >
@@ -454,31 +594,7 @@ function renderBlock(
         </>
       );
     case "capture":
-      return wrap(
-        <div className="tqr-capture" style={{ background: cssColor(p, "capturePanelBgColor"), borderColor: cssColor(p, "capturePanelBorderColor") }}>
-          <h3 style={headingStyle(p, 22)}>{String(p.title ?? "Get on the list")}</h3>
-          {!!p.subtitle &&<p style={bodyStyle(p)}>{String(p.subtitle)}</p>}
-          <fetcher.Form method="post">
-            <input type="hidden" name="blockId" value={String(b.id ?? "")} />
-            <input
-              type="email"
-              name="email"
-              required
-              placeholder={String(p.placeholder ?? "you@email.com")}
-              style={{
-                background: cssColor(p, "inputBgColor"),
-                color: cssColor(p, "inputTextColor"),
-                borderColor: cssColor(p, "inputBorderColor"),
-                "--placeholder-color": cssColor(p, "placeholderColor"),
-              } as CSSProperties}
-            />
-            <button type="submit" className="tqr-btn primary" disabled={fetcher.state !== "idle"} style={buttonInlineStyle(p)}>
-              {fetcher.state !== "idle" ? "…" : String(p.cta ?? "Notify me")}
-            </button>
-          </fetcher.Form>
-          {!!(fetcher.data && (fetcher.data as { ok?: boolean }).ok) && <div className="tqr-success">Thanks, you&apos;re on the list.</div>}
-        </div>
-      );
+      return wrap(<CaptureBlock block={b} ctx={ctx} onLead={onLead} />);
     case "text":
       return wrap(
         <>
@@ -489,19 +605,24 @@ function renderBlock(
     case "button":
       return wrap(
         <div className={b.layout?.align === "left" ? "" : b.layout?.align === "right" ? "right" : "center"}>
-          <a href={safeHref(p.href) ?? "#"} className={`tqr-btn ${String(p.variant ?? "primary")}`} style={buttonInlineStyle(p)}>{String(p.label ?? "")}{p.icon ? " →" : ""}</a>
+          <a href={ctx.link(p.href) ?? "#"} className={`tqr-btn ${String(p.variant ?? "primary")}`} style={buttonInlineStyle(p)}>{String(p.label ?? "")}{p.icon ? " →" : ""}</a>
         </div>
       );
-    case "image":
+    case "image": {
+      const src = safeImageUrl(p.src);
+      // Public page: an empty image block is skipped, the placeholder is an editor aid.
+      if (!src && !ctx.isPreview) return null;
       return wrap(
         <>
-          {p.src ? <div className="tqr-media" data-aspect={String(p.aspect || "16:9")}><img src={String(p.src)} alt={String(p.alt ?? "")} style={{ objectFit: (p.fit as "cover" | "contain") || "cover" }} /></div> :
+          {src ? <div className="tqr-media" data-aspect={String(p.aspect || "16:9")}><img src={src} alt={String(p.alt ?? "")} style={{ objectFit: (p.fit as "cover" | "contain") || "cover" }} /></div> :
             <div className="tqr-placeholder" data-aspect={String(p.aspect || "16:9")}>Image placeholder</div>}
           {!!p.caption &&<div className="tqr-caption">{String(p.caption)}</div>}
         </>
       );
+    }
     case "video": {
       const src = videoSrc(p.src);
+      if (!src && !ctx.isPreview) return null;
       return wrap(
         <>
           {!!p.title &&<h3>{String(p.title)}</h3>}
@@ -565,26 +686,28 @@ function renderBlock(
     case "products": {
       const selectedProducts = pickedResources(p.products).slice(0, Number(p.count) || 3);
       const collection = pickedResource(p.collection);
+      // Sample products are an editor preview aid — never shown to visitors.
+      if (!selectedProducts.length && !collection && !ctx.isPreview) return null;
       const products = selectedProducts.length ? selectedProducts : productSamples(Math.max(1, Number(p.count) || 3));
-      const href = collection
+      const href = ctx.link(collection
         ? shopifyResourceUrl(collection, "collections", shopDomain)
         : selectedProducts[0]
           ? shopifyResourceUrl(selectedProducts[0], "products", shopDomain)
-          : "#";
+          : "#") ?? "#";
       if (collection && !selectedProducts.length) {
         return wrap(
           <>
             <h2 style={headingStyle(p)}>{String(p.title ?? "Featured collection")}</h2>
             <a className="tqr-collection-card" href={href} style={cardInlineStyle(p)}>
               <div className="tqr-collection-img">
-                {collection.image ? <img src={collection.image} alt="" /> : null}
+                {safeImageUrl(collection.image) ? <img src={safeImageUrl(collection.image)} alt="" /> : null}
               </div>
               <div>
                 <div className="tqr-product-name" style={{ color: cssColor(p, "cardTextColor") }}>{collection.title}</div>
                 <div className="tqr-product-price" style={{ color: cssColor(p, "priceColor") }}>Collection</div>
               </div>
             </a>
-            <a href={href} className="tqr-btn secondary" style={buttonInlineStyle(p)}>{String(p.cta || "Shop collection")} →</a>
+            <a href={href} className="tqr-btn secondary" style={buttonInlineStyle(p)}>{String(p.cta || ctx.copy.shopCollection)} →</a>
           </>
         );
       }
@@ -593,14 +716,14 @@ function renderBlock(
           <h2 style={headingStyle(p)}>{String(p.title ?? "Featured")}</h2>
           <div className="tqr-products">
             {products.map((product, i) => (
-              <a key={product.id || i} className="tqr-product" href={product.handle ? shopifyResourceUrl(product, "products", shopDomain) : href} style={cardInlineStyle(p)}>
-                <div className="tqr-product-img">{product.image ? <img src={product.image} alt="" /> : null}</div>
+              <a key={product.id || i} className="tqr-product" href={product.handle ? ctx.link(shopifyResourceUrl(product, "products", shopDomain)) ?? href : href} style={cardInlineStyle(p)}>
+                <div className="tqr-product-img">{safeImageUrl(product.image) ? <img src={safeImageUrl(product.image)} alt="" /> : null}</div>
                 <div className="tqr-product-name" style={{ color: cssColor(p, "cardTextColor") }}>{product.title}</div>
                 <div className="tqr-product-price" style={{ color: cssColor(p, "priceColor") }}>{product.price}</div>
               </a>
             ))}
           </div>
-          {href !== "#" && <a href={href} className="tqr-btn secondary" style={buttonInlineStyle(p)}>{String(p.cta || "Shop selected")} →</a>}
+          {href !== "#" && <a href={href} className="tqr-btn secondary" style={buttonInlineStyle(p)}>{String(p.cta || ctx.copy.shopSelected)} →</a>}
         </>
       );
     }
@@ -609,30 +732,56 @@ function renderBlock(
   }
 }
 
+/** GA4 + Meta Pixel base code (Growth). Ids are validated by normalizeCampaignPageSettings. */
+function pixelScript(settings: CampaignPageSettings): string {
+  const parts: string[] = [];
+  if (settings.ga4MeasurementId) {
+    parts.push(
+      `window.dataLayer=window.dataLayer||[];function gtag(){dataLayer.push(arguments);}gtag("js",new Date());gtag("config",${JSON.stringify(settings.ga4MeasurementId)});` +
+      `(function(){var s=document.createElement("script");s.async=true;s.src="https://www.googletagmanager.com/gtag/js?id="+encodeURIComponent(${JSON.stringify(settings.ga4MeasurementId)});document.head.appendChild(s);})();`,
+    );
+  }
+  if (settings.metaPixelId) {
+    parts.push(
+      `!function(f,b,e,v,n,t,s){if(f.fbq)return;n=f.fbq=function(){n.callMethod?n.callMethod.apply(n,arguments):n.queue.push(arguments)};if(!f._fbq)f._fbq=n;n.push=n;n.loaded=!0;n.version="2.0";n.queue=[];t=b.createElement(e);t.async=!0;t.src=v;s=b.getElementsByTagName(e)[0];s.parentNode.insertBefore(t,s)}(window,document,"script","https://connect.facebook.net/en_US/fbevents.js");` +
+      `fbq("init",${JSON.stringify(settings.metaPixelId)});fbq("track","PageView");`,
+    );
+  }
+  return parts.join("\n");
+}
+
 export function CampaignLandingView({ data, fullDocument = true }: { data: CampaignLandingData; fullDocument?: boolean }) {
-  const fetcher = useFetcher<typeof action>();
   const settings = normalizeCampaignPageSettings(data.settings);
+  const ctx = makePageContext(data);
+  const pixels = pixelScript(settings);
+  // Conversion events for the page's pixels when a visitor signs up.
+  const onLead = useCallback(() => {
+    const w = window as unknown as { gtag?: (...args: unknown[]) => void; fbq?: (...args: unknown[]) => void };
+    w.gtag?.("event", "generate_lead", { campaign: data.slug });
+    w.fbq?.("track", "Lead");
+  }, [data.slug]);
   const content = (
     <>
       <style>{css}</style>
       <main className="tqr-page" data-layout={settings.layout} data-theme={settings.theme} style={pageStyle(settings)}>
         {data.isPreview && (
           <div className="tqr-preview-banner">
-            Preview mode · {data.status}
+            {ctx.copy.previewBanner} · {data.status}
           </div>
         )}
         <CampaignBrandBar settings={settings} fallbackName={data.name} />
         {data.blocks.length === 0 ? (
           <section className="tqr-block center">
             <h1>{data.name}</h1>
-            <p>This campaign has no blocks yet.</p>
+            <p>{ctx.copy.emptyPage}</p>
           </section>
-        ) : data.blocks.map(b => (
-          <div key={b.id}>{renderBlock(b, data.slug, data.shopDomain, data.qrById, fetcher)}</div>
+        ) : data.blocks.map((b, i) => (
+          <div key={b.id ?? i}>{renderBlock(b, ctx, data.qrById, onLead)}</div>
         ))}
-        <CampaignFooter settings={settings} />
+        <CampaignFooter settings={settings} link={ctx.link} copy={ctx.copy} />
       </main>
       <script dangerouslySetInnerHTML={{ __html: countdownScript }} />
+      {pixels && <script dangerouslySetInnerHTML={{ __html: pixels }} />}
     </>
   );
 
@@ -641,11 +790,11 @@ export function CampaignLandingView({ data, fullDocument = true }: { data: Campa
   }
 
   return (
-    <html lang="en">
+    <html lang={isCampaignLang(data.lang) ? data.lang : "en"}>
       <head>
         <meta charSet="utf-8" />
         <meta name="viewport" content="width=device-width,initial-scale=1" />
-        <title>{data.name} · TrackQr</title>
+        <title>{`${data.name} · TrackQr`}</title>
         <style>{css}</style>
       </head>
       <body>
@@ -749,11 +898,22 @@ const css = `
   .tqr-timer .lbl { font-size: 10px; color: var(--tqr-muted); text-transform: uppercase; letter-spacing: 0.08em; font-family: ui-monospace, monospace; }
   .tqr-promo { width: 100%; font-family: ui-monospace, monospace; letter-spacing: 0.08em; font-size: 28px; background: var(--tqr-panel); border: 1px dashed var(--tqr-panel-border); padding: 18px; border-radius: 10px; text-align: center; overflow-wrap: anywhere; }
   .tqr-capture { width: 100%; padding: 18px; border-radius: 12px; border: 1px solid transparent; }
-  .tqr-capture form { display: flex; gap: 8px; margin: 14px auto 0; max-width: 520px; }
-  .tqr-capture input { flex: 1; min-width: 0; padding: 12px 14px; border-radius: 10px; border: 1px solid rgba(255,255,255,0.16); background: rgba(255,255,255,0.06); color: #fff; font-size: 14px; }
-  .tqr-page[data-theme="light"] .tqr-capture input { background: #fff; color: #0F172A; border-color: rgba(15,23,42,0.16); }
+  .tqr-capture form { display: flex; flex-direction: column; gap: 10px; margin: 14px auto 0; max-width: 520px; }
+  .tqr-capture-row { display: flex; gap: 8px; }
+  .tqr-capture input[type="email"] { flex: 1; min-width: 0; padding: 12px 14px; border-radius: 10px; border: 1px solid rgba(255,255,255,0.16); background: rgba(255,255,255,0.06); color: #fff; font-size: 14px; }
+  .tqr-page[data-theme="light"] .tqr-capture input[type="email"] { background: #fff; color: #0F172A; border-color: rgba(15,23,42,0.16); }
   .tqr-capture input::placeholder { color: var(--placeholder-color, rgba(255,255,255,0.45)); }
+  .tqr-consent { display: flex; align-items: flex-start; gap: 8px; font-size: 12px; line-height: 1.45; color: var(--tqr-muted); text-align: left; cursor: pointer; }
+  .tqr-consent input { margin-top: 2px; accent-color: var(--tqr-accent, #2563EB); flex-shrink: 0; }
+  .tqr-consent a { color: inherit; text-decoration: underline; }
+  .tqr-hp { position: absolute; left: -10000px; width: 1px; height: 1px; overflow: hidden; }
+  .tqr-error { color: #F87171; font-size: 13px; }
+  .tqr-note { color: var(--tqr-muted); font-size: 12px; }
   .tqr-success { color: #4ADE80; margin-top: 10px; font-size: 13px; }
+  .tqr-success-panel { margin: 14px auto 0; max-width: 520px; }
+  .tqr-reward { margin-top: 14px; display: flex; flex-direction: column; align-items: center; gap: 10px; }
+  .tqr-reward-label { font-family: ui-monospace, monospace; font-size: 11px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--tqr-muted); }
+  .tqr-reward-code { font-size: 26px; user-select: all; }
   .tqr-urgency { background: rgba(220,38,38,0.18); border: 1px solid rgba(220,38,38,0.3); padding: 10px 14px; border-radius: 10px; font-size: 13px; }
   .tqr-urgency.warning { background: rgba(245,158,11,0.18); border-color: rgba(245,158,11,0.3); }
   .tqr-urgency.info    { background: rgba(37,99,235,0.18); border-color: rgba(37,99,235,0.3); }
@@ -824,8 +984,8 @@ const css = `
     .tqr-hero h1 { font-size: clamp(30px, 10vw, 40px); }
     .tqr-hero p { font-size: 15px; max-width: 34rem; }
     .tqr-timer { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-    .tqr-capture form { flex-direction: column; }
-    .tqr-capture input, .tqr-capture button { width: 100%; }
+    .tqr-capture-row { flex-direction: column; }
+    .tqr-capture input[type="email"], .tqr-capture button { width: 100%; }
     .tqr-products { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
     .tqr-collection-card { grid-template-columns: 84px minmax(0, 1fr); }
     .tqr-reviews { grid-template-columns: 1fr; }

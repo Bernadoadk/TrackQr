@@ -1,10 +1,12 @@
+import { buildZip, type ZipEntry } from "./zip.client";
+
 export type DownloadFormat = "png" | "svg" | "pdf";
 
-function safeFilename(name: string, fallback: string) {
+export function safeFilename(name: string, fallback: string) {
   return (name || fallback).trim().replace(/[^a-z0-9-_]+/gi, "-").replace(/^-+|-+$/g, "").toLowerCase() || fallback;
 }
 
-function triggerDownload(blob: Blob, filename: string) {
+export function triggerDownload(blob: Blob, filename: string) {
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
@@ -23,7 +25,7 @@ function bytesFromDataUrl(dataUrl: string) {
   return bytes;
 }
 
-async function canvasFromSvg(svg: string, size = 1400) {
+export async function canvasFromSvg(svg: string, size = 1400) {
   const svgBlob = new Blob([svg], { type: "image/svg+xml;charset=utf-8" });
   const url = URL.createObjectURL(svgBlob);
   try {
@@ -52,6 +54,16 @@ async function canvasFromSvg(svg: string, size = 1400) {
   }
 }
 
+export function canvasToJpeg(canvas: HTMLCanvasElement, quality = 0.95) {
+  return bytesFromDataUrl(canvas.toDataURL("image/jpeg", quality));
+}
+
+async function canvasToPng(canvas: HTMLCanvasElement): Promise<Blob> {
+  return new Promise<Blob>((resolve, reject) =>
+    canvas.toBlob(b => b ? resolve(b) : reject(new Error("PNG export failed")), "image/png"),
+  );
+}
+
 function buildJpegPdf(jpegBytes: Uint8Array, imageWidth: number, imageHeight: number) {
   const enc = new TextEncoder();
   const pageW = 612;
@@ -74,7 +86,23 @@ function buildJpegPdf(jpegBytes: Uint8Array, imageWidth: number, imageHeight: nu
       enc.encode("\nendstream\nendobj\n"),
     ),
   ];
+  return assemblePdf(objects);
+}
 
+export function concatBytes(...chunks: Uint8Array[]) {
+  const total = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    out.set(chunk, offset);
+    offset += chunk.length;
+  }
+  return out;
+}
+
+/** Header + objects + xref table + trailer (objects numbered from 1, catalog first). */
+export function assemblePdf(objects: Uint8Array[]) {
+  const enc = new TextEncoder();
   const header = enc.encode("%PDF-1.4\n");
   const offsets: number[] = [];
   let offset = header.length;
@@ -88,24 +116,20 @@ function buildJpegPdf(jpegBytes: Uint8Array, imageWidth: number, imageHeight: nu
   return concatBytes(header, ...objects, trailer);
 }
 
-function concatBytes(...chunks: Uint8Array[]) {
-  const total = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
-  const out = new Uint8Array(total);
-  let offset = 0;
-  for (const chunk of chunks) {
-    out.set(chunk, offset);
-    offset += chunk.length;
-  }
-  return out;
-}
+type DownloadableQr = { id: string; name: string; slug: string };
 
-export async function downloadQrAsset(qr: { id: string; name: string; slug: string }, format: DownloadFormat) {
+/** SVG of a QR code as rendered by the server (plan design rules applied). */
+export async function fetchQrSvg(qr: DownloadableQr, forExport: boolean, size = 1024): Promise<string> {
   // SVG and PDF are plan-gated exports (`download=1` lets the server enforce
   // it); the inline SVG rasterized into a PNG is available on every plan.
-  const res = await fetch(`/qr/${qr.id}/svg?size=1024${format === "png" ? "" : "&download=1"}`);
+  const res = await fetch(`/qr/${qr.id}/svg?size=${size}${forExport ? "&download=1" : ""}`);
   if (res.status === 402) throw new Error("SVG and PDF downloads require the Starter plan.");
   if (!res.ok) throw new Error("Could not prepare QR code");
-  const svg = await res.text();
+  return res.text();
+}
+
+export async function downloadQrAsset(qr: DownloadableQr, format: DownloadFormat) {
+  const svg = await fetchQrSvg(qr, format !== "png");
   const filename = safeFilename(qr.name, qr.slug);
 
   if (format === "svg") {
@@ -115,14 +139,28 @@ export async function downloadQrAsset(qr: { id: string; name: string; slug: stri
 
   const canvas = await canvasFromSvg(svg);
   if (format === "png") {
-    const blob = await new Promise<Blob>((resolve, reject) =>
-      canvas.toBlob(b => b ? resolve(b) : reject(new Error("PNG export failed")), "image/png"),
-    );
-    triggerDownload(blob, `${filename}.png`);
+    triggerDownload(await canvasToPng(canvas), `${filename}.png`);
     return;
   }
 
-  const jpeg = canvas.toDataURL("image/jpeg", 0.95);
-  const pdf = buildJpegPdf(bytesFromDataUrl(jpeg), canvas.width, canvas.height);
-  triggerDownload(new Blob([pdf], { type: "application/pdf" }), `${filename}.pdf`);
+  const pdf = buildJpegPdf(canvasToJpeg(canvas), canvas.width, canvas.height);
+  triggerDownload(new Blob([pdf as BlobPart], { type: "application/pdf" }), `${filename}.pdf`);
+}
+
+/** Several QR codes in one ZIP (PNG, or SVG on plans with exports). */
+export async function downloadQrZip(qrs: DownloadableQr[], format: "png" | "svg", onProgress?: (done: number) => void) {
+  const entries: ZipEntry[] = [];
+  let done = 0;
+  for (const qr of qrs) {
+    const svg = await fetchQrSvg(qr, format === "svg");
+    const base = safeFilename(qr.name, qr.slug);
+    if (format === "svg") {
+      entries.push({ name: `${base}.svg`, data: new TextEncoder().encode(svg) });
+    } else {
+      const blob = await canvasToPng(await canvasFromSvg(svg));
+      entries.push({ name: `${base}.png`, data: new Uint8Array(await blob.arrayBuffer()) });
+    }
+    onProgress?.(++done);
+  }
+  triggerDownload(buildZip(entries), `trackqr-${format}-${new Date().toISOString().slice(0, 10)}.zip`);
 }

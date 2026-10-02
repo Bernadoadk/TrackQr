@@ -1,6 +1,7 @@
 import { useEffect } from "react";
 import { Icon } from "./Icon";
 import { Button } from "./Button";
+import { t } from "../../lib/i18n";
 
 interface ConfirmDialogProps {
   open: boolean;
@@ -18,8 +19,8 @@ export function ConfirmDialog({
   open,
   title,
   description,
-  confirmLabel = "Confirm",
-  cancelLabel = "Cancel",
+  confirmLabel = t("Confirm"),
+  cancelLabel = t("Cancel"),
   tone = "danger",
   loading = false,
   onConfirm,
@@ -37,14 +38,19 @@ export function ConfirmDialog({
   if (!open) return null;
 
   return (
-    <div className="modal-overlay" onMouseDown={() => !loading && onClose()}>
+    <div
+      className="modal-overlay"
+      role="presentation"
+      onMouseDown={event => {
+        if (event.target === event.currentTarget && !loading) onClose();
+      }}
+    >
       <div
         className="modal confirm-dialog"
         role="dialog"
         aria-modal="true"
         aria-labelledby="confirm-dialog-title"
         aria-describedby="confirm-dialog-description"
-        onMouseDown={event => event.stopPropagation()}
       >
         <div className="modal-head">
           <div className="confirm-dialog-head">
@@ -56,14 +62,14 @@ export function ConfirmDialog({
               <div id="confirm-dialog-description" className="modal-sub">{description}</div>
             </div>
           </div>
-          <button className="modal-close" onClick={onClose} disabled={loading} aria-label="Close confirmation dialog">
+          <button className="modal-close" onClick={onClose} disabled={loading} aria-label={t("Close confirmation dialog")}>
             <Icon name="x" size={15} />
           </button>
         </div>
         <div className="modal-foot">
           <Button variant="ghost" onClick={onClose} disabled={loading}>{cancelLabel}</Button>
           <Button variant={tone === "danger" ? "danger" : "primary"} onClick={onConfirm} disabled={loading}>
-            {loading ? "Please wait..." : confirmLabel}
+            {loading ? t("Please wait...") : confirmLabel}
           </Button>
         </div>
       </div>

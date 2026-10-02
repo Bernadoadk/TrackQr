@@ -1,6 +1,6 @@
 import prisma from "../db.server";
 import type { Plan, Shop, Subscription } from "@prisma/client";
-import { FREE_PLAN_ID, type GatedFeature } from "./plan.constants";
+import { FREE_PLAN_ID, isPlanColumnFeature, planIncludes, planLabel, type GatedFeature } from "./plan.constants";
 
 export type ShopWithPlan = Shop & {
   activeSubscription: (Subscription & { plan: Plan }) | null;
@@ -194,8 +194,8 @@ export class QuotaExceededError extends Error {
   ) {
     super(
       reason === "full"
-        ? `Your ${planId} plan allows ${limit} ${resource === "qrCodes" ? "QR codes" : "campaigns"}. Archive or delete one, or upgrade to add more.`
-        : `This ${resource === "qrCodes" ? "QR code" : "campaign"} is beyond the ${limit} allowed by your ${planId} plan. Archive or delete older items, or upgrade to reactivate it.`,
+        ? `Your ${planLabel(planId)} plan allows ${limit} ${resource === "qrCodes" ? "QR codes" : "campaigns"}. Archive or delete one, or upgrade to add more.`
+        : `This ${resource === "qrCodes" ? "QR code" : "campaign"} is beyond the ${limit} allowed by your ${planLabel(planId)} plan. Archive or delete older items, or upgrade to reactivate it.`,
     );
     this.name = "QuotaExceededError";
   }
@@ -267,6 +267,15 @@ export async function getPlanUsage(shop: ShopWithPlan, quotas?: QuotaEnforcement
    Entitlements (feature flags + history window)
    ───────────────────────────────────────────────────────── */
 
+/**
+ * Does this plan include the feature? Plan-table features read their column,
+ * the others follow FEATURE_MIN_PLAN (plan.constants.ts).
+ */
+export function hasFeature(plan: Pick<Plan, "id"> & Partial<Plan>, feature: GatedFeature): boolean {
+  if (isPlanColumnFeature(feature)) return Boolean(plan[feature]);
+  return planIncludes(plan.id, feature);
+}
+
 export interface PlanEntitlements {
   plan: Plan;
   planId: string;
@@ -281,11 +290,17 @@ export interface PlanEntitlements {
   detailedAnalytics: boolean;
   exports: boolean;
   prioritySupport: boolean;
+  bulkCreate: boolean;
+  customFallback: boolean;
+  orderTracking: boolean;
+  smartRouting: boolean;
+  customerSync: boolean;
+  leadRewards: boolean;
+  automations: boolean;
+  campaignPixels: boolean;
 }
 
-export async function getPlanEntitlements(shop: ShopAccessInput): Promise<PlanEntitlements> {
-  const access = await getBillingAccess(shop);
-  const plan = access.plan;
+export function entitlementsForPlan(plan: Plan, status: BillingAccess["status"]): PlanEntitlements {
   const earliestScanDate = plan.historyDays == null
     ? null
     : new Date(Date.now() - plan.historyDays * 86400000);
@@ -294,7 +309,7 @@ export async function getPlanEntitlements(shop: ShopAccessInput): Promise<PlanEn
     plan,
     planId: plan.id,
     planName: plan.name,
-    status: access.status,
+    status,
     historyDays: plan.historyDays,
     earliestScanDate,
     qrCodeLimit: plan.qrCodeLimit,
@@ -304,7 +319,20 @@ export async function getPlanEntitlements(shop: ShopAccessInput): Promise<PlanEn
     detailedAnalytics: plan.detailedAnalytics,
     exports: plan.exports,
     prioritySupport: plan.prioritySupport,
+    bulkCreate: hasFeature(plan, "bulkCreate"),
+    customFallback: hasFeature(plan, "customFallback"),
+    orderTracking: hasFeature(plan, "orderTracking"),
+    smartRouting: hasFeature(plan, "smartRouting"),
+    customerSync: hasFeature(plan, "customerSync"),
+    leadRewards: hasFeature(plan, "leadRewards"),
+    automations: hasFeature(plan, "automations"),
+    campaignPixels: hasFeature(plan, "campaignPixels"),
   };
+}
+
+export async function getPlanEntitlements(shop: ShopAccessInput): Promise<PlanEntitlements> {
+  const access = await getBillingAccess(shop);
+  return entitlementsForPlan(access.plan, access.status);
 }
 
 export function applyHistoryLimit(from: Date, earliestScanDate: Date | null): Date {
@@ -328,6 +356,14 @@ const FEATURE_LABEL: Record<GatedFeature, string> = {
   exports: "Exports",
   attribution: "Shopify order attribution",
   prioritySupport: "Priority support",
+  bulkCreate: "Bulk QR code creation",
+  customFallback: "Custom fallback URL",
+  orderTracking: "Per-order QR codes",
+  smartRouting: "Smart routing and A/B tests",
+  customerSync: "Leads synced to Shopify customers",
+  leadRewards: "Unique discount rewards",
+  automations: "Shopify Flow automations",
+  campaignPixels: "Tracking pixels on campaign pages",
 };
 
 /**
@@ -339,5 +375,5 @@ export async function requireFeature(
   requiredPlanLabel: string,
 ): Promise<void> {
   const plan = await resolvePlan(shop);
-  if (!plan[feature]) throw new FeatureLockedError(feature, requiredPlanLabel);
+  if (!hasFeature(plan, feature)) throw new FeatureLockedError(feature, requiredPlanLabel);
 }

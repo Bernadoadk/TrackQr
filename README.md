@@ -1,239 +1,117 @@
-# Shopify App Template - React Router
+# TrackQr
 
-This is a template for building a [Shopify app](https://shopify.dev/docs/apps/getting-started) using [React Router](https://reactrouter.com/). It was forked from the [Shopify Remix app template](https://github.com/Shopify/shopify-app-template-remix) and converted to React Router.
+App Shopify de **QR codes dynamiques** : chaque code passe par une URL courte TrackQr, ce qui permet de compter les scans, de changer la destination sans réimprimer, d'appliquer un code de réduction, de router selon l'appareil ou le pays, de collecter des e-mails sur des pages de campagne et d'attribuer les commandes Shopify aux scans.
 
-Rather than cloning this repo, follow the [Quick Start steps](https://github.com/Shopify/shopify-app-template-react-router#quick-start).
+Stack : React Router 7 + `@shopify/shopify-app-react-router`, Prisma 6 / PostgreSQL, hébergement Vercel, extensions Shopify (thème + Flow).
 
-Visit the [`shopify.dev` documentation](https://shopify.dev/docs/api/shopify-app-react-router) for more details on the React Router app package.
+---
 
-## Upgrading from Remix
+## Forfaits
 
-If you have an existing Remix app that you want to upgrade to React Router, please follow the [upgrade guide](https://github.com/Shopify/shopify-app-template-react-router/wiki/Upgrading-from-Remix). Otherwise, please follow the quick start guide below.
+| | Free | Starter — 9 $/mois (84 $/an) | Growth — 29 $/mois (276 $/an) |
+|---|---|---|---|
+| QR codes dynamiques | 3 | 25 | illimités |
+| Pages de campagne | 1 | 5 | illimitées |
+| Historique des stats | 30 jours | 90 jours | illimité |
+| Design (logo, couleurs, cadres, modèles) | style standard | ✓ | ✓ |
+| Stats détaillées (appareils, pays, chronologie) | compteur | ✓ | ✓ |
+| Exports CSV, SVG/PDF, ZIP, planches d'impression | PNG | ✓ | ✓ |
+| Création en masse (catalogue / CSV) | — | ✓ | ✓ |
+| Page de secours personnalisée | — | ✓ | ✓ |
+| QR codes par commande (e-mails, bordereaux) | — | ✓ | ✓ |
+| Attribution des commandes et du chiffre d'affaires | — | — | ✓ |
+| Routage intelligent + tests A/B | — | — | ✓ |
+| Leads → clients Shopify, codes de réduction uniques | — | — | ✓ |
+| Déclencheurs Shopify Flow, GA4 / Meta Pixel | — | — | ✓ |
+| Support prioritaire | — | — | ✓ |
 
-## Quick start
+Pas d'essai gratuit : chaque boutique démarre sur Free. Les éléments au-delà des limites d'un forfait sont **mis en pause, jamais supprimés**, et reviennent automatiquement.
 
-### Prerequisites
+Le verrouillage se règle à un seul endroit : `app/lib/plan.constants.ts` (`FEATURE_MIN_PLAN`). Les cinq premières fonctionnalités sont aussi des colonnes de la table `Plan` (migrations de tarification).
 
-Before you begin, you'll need to [download and install the Shopify CLI](https://shopify.dev/docs/apps/tools/cli/getting-started) if you haven't already.
+---
 
-### Setup
-
-```shell
-shopify app init --template=https://github.com/Shopify/shopify-app-template-react-router
-```
-
-### Local Development
-
-```shell
-shopify app dev
-```
-
-Press P to open the URL to your app. Once you click install, you can start development.
-
-Local development is powered by [the Shopify CLI](https://shopify.dev/docs/apps/tools/cli). It logs into your account, connects to an app, provides environment variables, updates remote config, creates a tunnel and provides commands to generate extensions.
-
-### Authenticating and querying data
-
-To authenticate and query data you can use the `shopify` const that is exported from `/app/shopify.server.js`:
-
-```js
-export async function loader({ request }) {
-  const { admin } = await shopify.authenticate.admin(request);
-
-  const response = await admin.graphql(`
-    {
-      products(first: 25) {
-        nodes {
-          title
-          description
-        }
-      }
-    }`);
-
-  const {
-    data: {
-      products: { nodes },
-    },
-  } = await response.json();
-
-  return nodes;
-}
-```
-
-This template comes pre-configured with examples of:
-
-1. Setting up your Shopify app in [/app/shopify.server.ts](https://github.com/Shopify/shopify-app-template-react-router/blob/main/app/shopify.server.ts)
-2. Querying data using Graphql. Please see: [/app/routes/app.\_index.tsx](https://github.com/Shopify/shopify-app-template-react-router/blob/main/app/routes/app._index.tsx).
-3. Responding to webhooks. Please see [/app/routes/webhooks.tsx](https://github.com/Shopify/shopify-app-template-react-router/blob/main/app/routes/webhooks.app.uninstalled.tsx).
-4. Using metafields, metaobjects, and declarative custom data definitions. Please see [/app/routes/app.\_index.tsx](https://github.com/Shopify/shopify-app-template-react-router/blob/main/app/routes/app._index.tsx) and [shopify.app.toml](https://github.com/Shopify/shopify-app-template-react-router/blob/main/shopify.app.toml).
-
-Please read the [documentation for @shopify/shopify-app-react-router](https://shopify.dev/docs/api/shopify-app-react-router) to see what other API's are available.
-
-## Shopify Dev MCP
-
-This template is configured with the Shopify Dev MCP. This instructs [Cursor](https://cursor.com/), [GitHub Copilot](https://github.com/features/copilot) and [Claude Code](https://claude.com/product/claude-code) and [Google Gemini CLI](https://github.com/google-gemini/gemini-cli) to use the Shopify Dev MCP.
-
-For more information on the Shopify Dev MCP please read [the documentation](https://shopify.dev/docs/apps/build/devmcp).
-
-## Deployment
-
-### Application Storage
-
-This template uses [Prisma](https://www.prisma.io/) to store session data, by default using an [SQLite](https://www.sqlite.org/index.html) database.
-The database is defined as a Prisma schema in `prisma/schema.prisma`.
-
-This use of SQLite works in production if your app runs as a single instance.
-The database that works best for you depends on the data your app needs and how it is queried.
-Here’s a short list of databases providers that provide a free tier to get started:
-
-| Database   | Type             | Hosters                                                                                                                                                                                                                                    |
-| ---------- | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| MySQL      | SQL              | [Digital Ocean](https://www.digitalocean.com/products/managed-databases-mysql), [Planet Scale](https://planetscale.com/), [Amazon Aurora](https://aws.amazon.com/rds/aurora/), [Google Cloud SQL](https://cloud.google.com/sql/docs/mysql) |
-| PostgreSQL | SQL              | [Digital Ocean](https://www.digitalocean.com/products/managed-databases-postgresql), [Amazon Aurora](https://aws.amazon.com/rds/aurora/), [Google Cloud SQL](https://cloud.google.com/sql/docs/postgres)                                   |
-| Redis      | Key-value        | [Digital Ocean](https://www.digitalocean.com/products/managed-databases-redis), [Amazon MemoryDB](https://aws.amazon.com/memorydb/)                                                                                                        |
-| MongoDB    | NoSQL / Document | [Digital Ocean](https://www.digitalocean.com/products/managed-databases-mongodb), [MongoDB Atlas](https://www.mongodb.com/atlas/database)                                                                                                  |
-
-To use one of these, you can use a different [datasource provider](https://www.prisma.io/docs/reference/api-reference/prisma-schema-reference#datasource) in your `schema.prisma` file, or a different [SessionStorage adapter package](https://github.com/Shopify/shopify-api-js/blob/main/packages/shopify-api/docs/guides/session-storage.md).
-
-### Build
-
-Build the app by running the command below with the package manager of your choice:
-
-Using yarn:
-
-```shell
-yarn build
-```
-
-Using npm:
-
-```shell
-npm run build
-```
-
-Using pnpm:
-
-```shell
-pnpm run build
-```
-
-## Hosting
-
-When you're ready to set up your app in production, you can follow [our deployment documentation](https://shopify.dev/docs/apps/launch/deployment) to host it externally. From there, you have a few options:
-
-- [Google Cloud Run](https://shopify.dev/docs/apps/launch/deployment/deploy-to-google-cloud-run): This tutorial is written specifically for this example repo, and is compatible with the extended steps included in the subsequent [**Build your app**](tutorial) in the **Getting started** docs. It is the most detailed tutorial for taking a React Router-based Shopify app and deploying it to production. It includes configuring permissions and secrets, setting up a production database, and even hosting your apps behind a load balancer across multiple regions.
-- [Fly.io](https://fly.io/docs/js/shopify/): Leverages the Fly.io CLI to quickly launch Shopify apps to a single machine.
-- [Render](https://render.com/docs/deploy-shopify-app): This tutorial guides you through using Docker to deploy and install apps on a Dev store.
-- [Manual deployment guide](https://shopify.dev/docs/apps/launch/deployment/deploy-to-hosting-service): This resource provides general guidance on the requirements of deployment including environment variables, secrets, and persistent data.
-
-When you reach the step for [setting up environment variables](https://shopify.dev/docs/apps/deployment/web#set-env-vars), you also need to set the variable `NODE_ENV=production`.
-
-## Gotchas / Troubleshooting
-
-### Database tables don't exist
-
-If you get an error like:
+## Architecture
 
 ```
-The table `main.Session` does not exist in the current database.
+app/
+  routes/
+    app.*.tsx              Admin intégré (tableau de bord, création, Mes QR codes, création en masse,
+                           statistiques, campagnes + éditeur, paramètres, tarifs, aide)
+    s.$slug.tsx            Scan : redirection, routage, pages Texte / Wi-Fi / vCard, page de secours
+    c.$slug.tsx            Page de campagne publique (+ formulaire d'inscription)
+    campaigns_.$id.preview Aperçu signé d'une campagne (lien valable 24 h)
+    qr.$id.(png|svg|pdf)   Rendus d'un QR code (?ref= pour les QR par commande)
+    api.cron.weekly-report Rapport hebdomadaire (cron Vercel)
+    webhooks.*             Commandes (attribution), RGPD, désinstallation, scopes
+  lib/
+    plan.constants.ts      Forfaits et fonctionnalités par forfait (client-safe)
+    plan.server.ts         Droits, quotas, mise en pause automatique
+    qr.server.ts           Construction des redirections (UTM, réduction, panier)
+    routing.ts             Règles de routage intelligent + A/B
+    attribution*.ts        Paramètres de scan → attributs de panier → commande
+    leads / rewards / customers / flow .server.ts   Inscriptions, codes uniques, clients, Flow
+    weekly-report.server.ts Rapport hebdomadaire par e-mail
+    i18n.ts, i18n.server.ts Traductions (voir plus bas)
+  locales/fr.ts            Dictionnaire français de l'admin
+extensions/
+  trackqr-attribution      Intégration d'app (thème) qui copie le scan dans le panier
+  flow-lead-captured       Déclencheur Flow « Campaign lead captured »
+  flow-order-attributed    Déclencheur Flow « Order attributed to QR code »
 ```
 
-Create the database for Prisma. Run the `setup` script in `package.json` using `npm`, `yarn` or `pnpm`.
+Principes :
 
-### Navigating/redirecting breaks an embedded app
+- **Jamais de page d'erreur** : un code en pause, programmé, expiré ou hors quota redirige vers la page de secours (ou l'accueil de la boutique) et le scan est compté comme « manqué ».
+- Les scans des robots (aperçus de liens, etc.) ne sont pas comptés ; les IP sont hachées avec un sel quotidien, jamais stockées.
+- Les contenus saisis par le marchand sont assainis (`url-safety.ts`) ; les CSV sont protégés contre l'injection de formules ; les aperçus utilisent des jetons HMAC.
 
-Embedded apps must maintain the user session, which can be tricky inside an iFrame. To avoid issues:
+---
 
-1. Use `Link` from `react-router` or `@shopify/polaris`. Do not use `<a>`.
-2. Use `redirect` returned from `authenticate.admin`. Do not use `redirect` from `react-router`
-3. Use `useSubmit` from `react-router`.
+## Développement local
 
-This only applies if your app is embedded, which it will be by default.
+Prérequis : Node 20.19+ ou 22.12+, PostgreSQL, [Shopify CLI](https://shopify.dev/docs/apps/tools/cli).
 
-### Webhooks: shop-specific webhook subscriptions aren't updated
-
-If you are registering webhooks in the `afterAuth` hook, using `shopify.registerWebhooks`, you may find that your subscriptions aren't being updated.
-
-Instead of using the `afterAuth` hook declare app-specific webhooks in the `shopify.app.toml` file. This approach is easier since Shopify will automatically sync changes every time you run `deploy` (e.g: `npm run deploy`). Please read these guides to understand more:
-
-1. [app-specific vs shop-specific webhooks](https://shopify.dev/docs/apps/build/webhooks/subscribe#app-specific-subscriptions)
-2. [Create a subscription tutorial](https://shopify.dev/docs/apps/build/webhooks/subscribe/get-started?deliveryMethod=https)
-
-If you do need shop-specific webhooks, keep in mind that the package calls `afterAuth` in 2 scenarios:
-
-- After installing the app
-- When an access token expires
-
-During normal development, the app won't need to re-authenticate most of the time, so shop-specific subscriptions aren't updated. To force your app to update the subscriptions, uninstall and reinstall the app. Revisiting the app will call the `afterAuth` hook.
-
-### Webhooks: Admin created webhook failing HMAC validation
-
-Webhooks subscriptions created in the [Shopify admin](https://help.shopify.com/en/manual/orders/notifications/webhooks) will fail HMAC validation. This is because the webhook payload is not signed with your app's secret key.
-
-The recommended solution is to use [app-specific webhooks](https://shopify.dev/docs/apps/build/webhooks/subscribe#app-specific-subscriptions) defined in your toml file instead. Test your webhooks by triggering events manually in the Shopify admin(e.g. Updating the product title to trigger a `PRODUCTS_UPDATE`).
-
-### Webhooks: Admin object undefined on webhook events triggered by the CLI
-
-When you trigger a webhook event using the Shopify CLI, the `admin` object will be `undefined`. This is because the CLI triggers an event with a valid, but non-existent, shop. The `admin` object is only available when the webhook is triggered by a shop that has installed the app. This is expected.
-
-Webhooks triggered by the CLI are intended for initial experimentation testing of your webhook configuration. For more information on how to test your webhooks, see the [Shopify CLI documentation](https://shopify.dev/docs/apps/tools/cli/commands#webhook-trigger).
-
-### Incorrect GraphQL Hints
-
-By default the [graphql.vscode-graphql](https://marketplace.visualstudio.com/items?itemName=GraphQL.vscode-graphql) extension for will assume that GraphQL queries or mutations are for the [Shopify Admin API](https://shopify.dev/docs/api/admin). This is a sensible default, but it may not be true if:
-
-1. You use another Shopify API such as the storefront API.
-2. You use a third party GraphQL API.
-
-If so, please update [.graphqlrc.ts](https://github.com/Shopify/shopify-app-template-react-router/blob/main/.graphqlrc.ts).
-
-### Using Defer & await for streaming responses
-
-By default the CLI uses a cloudflare tunnel. Unfortunately cloudflare tunnels wait for the Response stream to finish, then sends one chunk. This will not affect production.
-
-To test [streaming using await](https://reactrouter.com/api/components/Await#await) during local development we recommend [localhost based development](https://shopify.dev/docs/apps/build/cli-for-apps/networking-options#localhost-based-development).
-
-### "nbf" claim timestamp check failed
-
-This is because a JWT token is expired. If you are consistently getting this error, it could be that the clock on your machine is not in sync with the server. To fix this ensure you have enabled "Set time and date automatically" in the "Date and Time" settings on your computer.
-
-### Using MongoDB and Prisma
-
-If you choose to use MongoDB with Prisma, there are some gotchas in Prisma's MongoDB support to be aware of. Please see the [Prisma SessionStorage README](https://www.npmjs.com/package/@shopify/shopify-app-session-storage-prisma#mongodb).
-
-### Unable to require(`C:\...\query_engine-windows.dll.node`).
-
-Unable to require(`C:\...\query_engine-windows.dll.node`).
-The Prisma engines do not seem to be compatible with your system.
-
-query_engine-windows.dll.node is not a valid Win32 application.
-
-**Fix:** Set the environment variable:
-
-```shell
-PRISMA_CLIENT_ENGINE_TYPE=binary
+```bash
+npm install
+cp .env.example .env          # puis renseigner DATABASE_URL, SMTP…
+npx prisma migrate deploy
+npm run dev                   # shopify app dev
 ```
 
-This forces Prisma to use the binary engine mode, which runs the query engine as a separate process and can work via emulation on Windows ARM64.
+| Script | Rôle |
+|---|---|
+| `npm run dev` | Serveur de développement via Shopify CLI |
+| `npm run build` | Build de production |
+| `npm test` | Tests unitaires (Vitest) |
+| `npm run lint` | ESLint |
+| `npm run typecheck` | Types des routes + `tsc` |
+| `npm run setup` | `prisma generate` + `prisma migrate deploy` |
 
-## Resources
+Les tests couvrent les modules purs : routage, redirections, sécurité des URL, CSV, Wi-Fi, signatures, forfaits et traductions (dont un test qui échoue si un texte de l'admin n'a pas de traduction française).
 
-React Router:
+---
 
-- [React Router docs](https://reactrouter.com/home)
+## Traductions
 
-Shopify:
+**Admin (anglais + français)** — `app/lib/i18n.ts` :
 
-- [Intro to Shopify apps](https://shopify.dev/docs/apps/getting-started)
-- [Shopify App React Router docs](https://shopify.dev/docs/api/shopify-app-react-router)
-- [Shopify CLI](https://shopify.dev/docs/apps/tools/cli)
-- [Shopify App Bridge](https://shopify.dev/docs/api/app-bridge-library).
-- [Polaris Web Components](https://shopify.dev/docs/api/app-home/polaris-web-components).
-- [App extensions](https://shopify.dev/docs/apps/app-extensions/list)
-- [Shopify Functions](https://shopify.dev/docs/api/functions)
+- la clé est le texte anglais : `t("Save settings")` ;
+- `t("Upgrade to {plan}", { plan })` interpole, `tp(n, "{count} scan", "{count} scans")` gère les pluriels (0 est singulier en français, et des variantes `clé|one` / `clé|other` existent quand l'anglais n'a qu'une forme) ;
+- `tm(message)` traduit les messages renvoyés par le serveur, y compris ceux qui contiennent des valeurs (motifs `{plan}`) ;
+- `tx()` / `tem()` gèrent les phrases avec balisage et les titres de page avec un mot mis en valeur (`<em>…</em>`) ;
+- la langue vient du paramètre `locale` que Shopify ajoute à l'ouverture de l'app (sinon la langue du navigateur). Elle est mémorisée dans les réglages de la boutique pour les **e-mails** (rapport hebdomadaire, alertes de leads).
 
-Internationalization:
+Ajouter une langue : créer `app/locales/xx.ts` sur le modèle de `fr.ts`, l'ajouter à `LOCALES` et `DICTIONARIES` dans `i18n.ts`, puis lancer `npm test`.
 
-- [Internationalizing your app](https://shopify.dev/docs/apps/best-practices/internationalization/getting-started)
+**Pages publiques** — dans la langue du visiteur (en, fr, es, de, pt) : `s.$slug.tsx` (pages Texte / Wi-Fi / vCard) et `app/lib/campaign-copy.ts` (boutons et messages des pages de campagne). Le contenu écrit par le marchand est affiché tel quel.
 
-Thank you!!!
+---
+
+## Déploiement
+
+1. **Shopify** : `npm run deploy` (`shopify app deploy`) publie les scopes (`read_products, write_discounts, read_orders` + `write_customers` optionnel, demandé depuis Paramètres), les webhooks (API `2026-07`) et les extensions (intégration de thème + 2 déclencheurs Flow).
+2. **Vercel** : renseigner les variables de `.env.example` (au minimum `SHOPIFY_API_KEY`, `SHOPIFY_API_SECRET`, `SHOPIFY_APP_URL`, `SCOPES`, `DATABASE_URL`, `IP_HASH_PEPPER`, `CRON_SECRET`, SMTP). Le build applique les migrations Prisma. Le cron `/api/cron/weekly-report` (déclaré dans `vercel.json`) envoie les rapports hebdomadaires.
+3. **Domaine de scan (recommandé)** : `SCAN_BASE_URL=https://scan.votremarque.com` (CNAME vers l'app). C'est l'URL encodée dans les QR codes : elle doit rester stable tant que des codes sont imprimés.
+
+L'API Admin utilisée par l'app est `2026-04` (`app/shopify.server.ts`), la plus récente gérée par `@shopify/shopify-api` 12.3.

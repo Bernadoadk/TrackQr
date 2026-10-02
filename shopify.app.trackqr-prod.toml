@@ -44,34 +44,13 @@ api_version = "2026-07"
 
 [access_scopes]
 # Learn more at https://shopify.dev/docs/apps/tools/cli/configuration#access_scopes
-# write_products  — includes product reads needed for the QR Create page product picker
-# write_discounts — includes discount reads needed for the QR promo type
-# read_orders    — needed for order webhook attribution
-scopes = "write_products,write_discounts,read_orders,write_metaobjects,write_metaobject_definitions"
+# read_products   — product / variant / collection pickers (Create, Bulk create, campaigns)
+# write_discounts — promo codes created from the Create page and capture rewards
+# read_orders     — order webhooks used for sales attribution
+scopes = "read_products,write_discounts,read_orders"
+# Requested only when a merchant turns on "Leads → Shopify customers" (Growth),
+# from Settings, through App Bridge shopify.scopes.request().
+optional_scopes = [ "write_customers" ]
 
 [auth]
 redirect_urls = [ "https://track-qr-green.vercel.app/auth/callback" ]
-
-[product.metafields.app.demo_info]
-type = "single_line_text_field"
-name = "Demo Source Info"
-description = "Tracks products created by the Shopify app template for development"
-
-  [product.metafields.app.demo_info.access]
-  admin = "merchant_read_write"
-
-[metaobjects.app.example]
-name = "Example"
-description = "An example metaobject definition created by this template"
-
-  [metaobjects.app.example.access]
-  admin = "merchant_read_write"
-
-[metaobjects.app.example.fields.title]
-name = "Title"
-type = "single_line_text_field"
-required = true
-
-[metaobjects.app.example.fields.description]
-name = "Description"
-type = "multi_line_text_field"

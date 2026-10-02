@@ -1,4 +1,4 @@
-import { Links, Meta, Outlet, Scripts, ScrollRestoration, useRouteError } from "react-router";
+import { Links, Meta, Outlet, Scripts, ScrollRestoration, useMatches, useRouteError, useRouteLoaderData } from "react-router";
 import { RouteError } from "./components/RouteError";
 import globalStyles from "./styles/globals.css?url";
 
@@ -62,8 +62,15 @@ export function links() {
 }
 
 export default function App() {
+  // Admin: the merchant's language (entry.client.tsx loads its dictionary
+  // from data-admin-locale). Campaign pages: the visitor's language.
+  const appData = useRouteLoaderData("routes/app") as { locale?: string } | undefined;
+  const pageLang = useMatches().reduce<string | undefined>((lang, match) => {
+    const data = match.data as { lang?: unknown } | undefined;
+    return typeof data?.lang === "string" ? data.lang : lang;
+  }, undefined);
   return (
-    <html lang="en">
+    <html lang={appData?.locale ?? pageLang ?? "en"} data-admin-locale={appData?.locale}>
       <head>
         <meta charSet="utf-8" />
         <meta name="viewport" content="width=device-width,initial-scale=1" />

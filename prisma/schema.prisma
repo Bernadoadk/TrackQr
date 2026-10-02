@@ -145,6 +145,8 @@ enum QrType {
   EMAIL
   WIFI
   VCARD
+  COLLECTION
+  PAGE
 }
 
 model QrCode {
@@ -177,11 +179,19 @@ model QrCode {
   activatesAt   DateTime?
   expiresAt     DateTime?
   archivedAt    DateTime?
+  // Where scans land while the code can't serve its destination (paused,
+  // not active yet, expired, over quota). Null = the store home page.
+  fallbackUrl   String?
+  // Discount code applied automatically on Shopify destinations.
+  discountCode  String?
+  // Smart routing rules + A/B split (Growth) — see app/lib/routing.ts.
+  rules         Json     @default("[]")
   // If this QR is bound to a campaign (1:1 optional)
   campaignId    String?  @unique
   campaign      Campaign? @relation(fields: [campaignId], references: [id])
 
   scans         Scan[]
+  missedScans   MissedScan[]
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
 
@@ -235,7 +245,13 @@ model Scan {
   referer       String?
   // truthy when target completes (placeholder for future "did the redirect happen")
   delivered     Boolean  @default(true)
-  conversion    Conversion?
+  // Optional reference carried by the scan URL (?ref=…), e.g. the order
+  // number printed on a packing slip.
+  ref           String?
+  // Smart-routing rule or A/B variant that served the scan ("rule:<id>", "ab:A", "ab:B").
+  route         String?
+  // A scan can lead to several orders (the storefront keeps it 7 days).
+  conversions   Conversion[]
   createdAt     DateTime @default(now())
 
   @@index([qrCodeId, createdAt])
@@ -243,11 +259,34 @@ model Scan {
 }
 
 /* ─────────────────────────────────────────────────────────
+   MissedScan — a scan that could not reach the QR destination
+   (paused, scheduled, expired, over quota, archived). The visitor is
+   sent to the fallback URL; the merchant sees what was lost.
+   ───────────────────────────────────────────────────────── */
+enum MissedScanReason {
+  PAUSED
+  SCHEDULED
+  EXPIRED
+  OVER_QUOTA
+  ARCHIVED
+}
+
+model MissedScan {
+  id            String   @id @default(cuid())
+  qrCodeId      String
+  qrCode        QrCode   @relation(fields: [qrCodeId], references: [id], onDelete: Cascade)
+  reason        MissedScanReason
+  createdAt     DateTime @default(now())
+
+  @@index([qrCodeId, createdAt])
+}
+
+/* ─────────────────────────────────────────────────────────
    Conversion — attributed Shopify order
    ───────────────────────────────────────────────────────── */
 model Conversion {
   id            String   @id @default(cuid())
-  scanId        String   @unique
+  scanId        String
   scan          Scan     @relation(fields: [scanId], references: [id], onDelete: Cascade)
   // Shopify order admin gid
   shopifyOrderId String  @unique
@@ -257,6 +296,7 @@ model Conversion {
   attributedAt  DateTime @default(now())
 
   @@index([shopifyOrderId])
+  @@index([scanId])
 }
 
 /* ─────────────────────────────────────────────────────────
@@ -288,11 +328,42 @@ model Campaign {
 
   qrCode        QrCode?
   leads         Lead[]
+  views         CampaignView[]
+  rewards       CampaignReward[]
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
 
   @@index([shopId, createdAt])
   @@index([shopId, status])
+}
+
+/* ─────────────────────────────────────────────────────────
+   CampaignView — one row per (human) visit of a public campaign page
+   ───────────────────────────────────────────────────────── */
+model CampaignView {
+  id            String   @id @default(cuid())
+  campaignId    String
+  campaign      Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  sessionToken  String?
+  createdAt     DateTime @default(now())
+
+  @@index([campaignId, createdAt])
+}
+
+/* ─────────────────────────────────────────────────────────
+   CampaignReward — Shopify code discount backing the unique codes
+   handed out by a capture block ("sign up and unlock -10 %").
+   ───────────────────────────────────────────────────────── */
+model CampaignReward {
+  id             String   @id @default(cuid())
+  campaignId     String
+  campaign       Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  blockId        String
+  percent        Int
+  discountNodeId String
+  createdAt      DateTime @default(now())
+
+  @@unique([campaignId, blockId, percent])
 }
 
 /* ─────────────────────────────────────────────────────────
@@ -312,8 +383,16 @@ model Lead {
   email         String
   // optional fields collected (first name, custom)
   fields        Json     @default("{}")
-  source        String?  // ip + ua summary
-  destination   String   @default("db") // db | klaviyo | mailchimp | hubspot | csv
+  source        String?  // user-agent summary
+  // SHA-256(ip + dailySalt) — never the raw IP (same scheme as Scan.ipHash)
+  ipHash        String?
+  // Visitor ticked the marketing-consent checkbox of the capture block
+  consent       Boolean  @default(false)
+  // Unique discount code handed out to this lead (capture reward)
+  rewardCode    String?
+  // Shopify customer created / updated from this lead (customer sync)
+  shopifyCustomerId String?
+  destination   String   @default("db") // db | smtp | shopify
   syncStatus    LeadSyncStatus @default(DB_ONLY)
   syncError     String?
   createdAt     DateTime @default(now())

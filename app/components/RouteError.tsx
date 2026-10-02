@@ -1,4 +1,5 @@
 import { isRouteErrorResponse } from "react-router";
+import { t, tm } from "../lib/i18n";
 
 function isHtmlResponse(data: unknown): data is string {
   if (typeof data !== "string") return false;
@@ -46,10 +47,10 @@ export function RouteError({ error }: { error: unknown }) {
   }
 
   const status = isRouteErrorResponse(error) ? error.status : 500;
-  const statusText = isRouteErrorResponse(error) ? error.statusText : "Application error";
+  const statusText = isRouteErrorResponse(error) ? error.statusText : t("Application error");
   const message = isRouteErrorResponse(error)
-    ? messageFromData(error.data) || statusText
-    : messageFromData(error) || "Something went wrong.";
+    ? tm(messageFromData(error.data)) || statusText
+    : tm(messageFromData(error)) || t("Something went wrong.");
 
   return (
     <main
@@ -75,10 +76,10 @@ export function RouteError({ error }: { error: unknown }) {
         }}
       >
         <p style={{ margin: "0 0 8px", color: "#6d7175", fontSize: 13 }}>
-          Error {status}
+          {t("Error {status}", { status: String(status) })}
         </p>
         <h1 style={{ margin: "0 0 12px", fontSize: 22, lineHeight: 1.25 }}>
-          {statusText || "Application error"}
+          {statusText || t("Application error")}
         </h1>
         <pre
           style={{

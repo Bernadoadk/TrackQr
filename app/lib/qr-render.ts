@@ -343,13 +343,29 @@ const DEFAULTS: Required<Pick<QrRenderOpts, "fg" | "bg" | "style" | "cornerStyle
   withLogo: false,
 };
 
+const HEX = /^#[0-9a-fA-F]{6}$/;
+const hex = (value: unknown, fallback: string) => (typeof value === "string" && HEX.test(value) ? value : fallback);
+
+/** Size of the Create page preview — margins and label metrics are defined at this size. */
+const BASE_SIZE = 220;
+
 export function renderQrSvg(text: string, opts: QrRenderOpts = {}): string {
-  const o = { ...DEFAULTS, ...opts };
-  const size = opts.size ?? 220;
-  const margin = opts.margin ?? 8;
-  const logoSize = opts.logoSize ?? 0.20;
-  const cornerColor = opts.cornerColor ?? o.fg;
-  const gradient = opts.gradient ?? null;
+  // Colors end up in SVG attributes: anything but a 6-digit hex falls back.
+  const o = {
+    ...DEFAULTS,
+    ...opts,
+    fg: hex(opts.fg, DEFAULTS.fg),
+    bg: hex(opts.bg, DEFAULTS.bg),
+  };
+  const size = opts.size ?? BASE_SIZE;
+  // The quiet zone is chosen on the 220px preview: scale it with the output
+  // so a 1024px download keeps the same proportions as what was designed.
+  const margin = Math.max(0, Math.min(24, Number(opts.margin ?? 8) || 0)) * (size / BASE_SIZE);
+  const logoSize = Math.max(0.05, Math.min(0.4, Number(opts.logoSize ?? 0.20) || 0.2));
+  const cornerColor = hex(opts.cornerColor, o.fg);
+  const gradient = opts.gradient && HEX.test(opts.gradient.from) && HEX.test(opts.gradient.to)
+    ? { from: opts.gradient.from, to: opts.gradient.to, angle: Number(opts.gradient.angle ?? 45) || 0 }
+    : null;
   // Stable id for the SVG gradient def (avoids collisions across multiple
   // QR SVGs on the same page — uses size+colors as a poor-man's hash).
   const gradId = gradient
@@ -473,7 +489,8 @@ function wrapWithLabelAndFrame(qrSvg: string, qrSize: number, bg: string, fg: st
     label.frame ??
     ((label as { framed?: boolean }).framed ? "outline" : "none");
   const framed = frameStyle !== "none";
-  const frameColor = label.frameColor ?? fg;
+  const frameColor = hex(label.frameColor, fg);
+  const bandColor = label.bandColor && HEX.test(label.bandColor) ? label.bandColor : undefined;
   const fontSpec = getLabelFont(label.font);
   const scale = qrSize / 220;
   const qrBox = (pos === "left" || pos === "right") ? 160 * scale : 200 * scale;
@@ -506,7 +523,7 @@ function wrapWithLabelAndFrame(qrSvg: string, qrSize: number, bg: string, fg: st
   // When the user has explicitly picked a `labelColor`, that always wins.
   const inverted = frameInvertsLabel(frameStyle);
   const baseColor = inverted ? bg : fg;
-  const color = label.labelColor ?? baseColor;
+  const color = hex(label.labelColor, baseColor);
   const align = label.align ?? "center";
 
   const labelBoxW = (pos === "left" || pos === "right") ? 180 * scale : 200 * scale;
@@ -572,7 +589,7 @@ function wrapWithLabelAndFrame(qrSvg: string, qrSize: number, bg: string, fg: st
     ? renderFrameSvg(frameStyle, {
         width: outerW, height: outerH,
         color: frameColor,
-        bandColor: label.bandColor,
+        bandColor,
         bg: "transparent",
         inset: 8 * scale,
         strokeWidth: 1.6 * scale,

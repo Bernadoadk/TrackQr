@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
-import { Outlet, useLocation, useNavigation } from "react-router";
-import { Sidebar } from "./Sidebar";
+import { Outlet, useLocation, useNavigate, useNavigation } from "react-router";
+import { NAV_ITEMS, SECONDARY, Sidebar } from "./Sidebar";
+import { withEmbeddedParams } from "../../lib/embedded-params";
 import { PlanNotice } from "./PlanNotice";
 import { ToastProvider } from "../ui/Toast";
 import { TweaksPanel, TweakValues, TWEAK_DEFAULTS } from "../ui/TweaksPanel";
@@ -54,9 +55,37 @@ function loadTweaks(): TweakValues {
   return { ...TWEAK_DEFAULTS, ...(legacyTheme ? { theme: legacyTheme } : {}) };
 }
 
+/** Single-key shortcuts shown in the sidebar (D, C, Q, B, A, P, S, H). */
+function useNavShortcuts() {
+  const navigate = useNavigate();
+  const location = useLocation();
+  useEffect(() => {
+    const map = new Map<string, string>();
+    for (const item of [...NAV_ITEMS, ...SECONDARY]) {
+      if (item.kbd && !("soon" in item && item.soon)) map.set(item.kbd.toLowerCase(), item.path);
+    }
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return;
+      const target = event.target as HTMLElement | null;
+      if (target && (target.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName))) return;
+      // A modal is open: keys belong to it.
+      if (document.querySelector(".modal-overlay")) return;
+      // Pages holding unsaved work (forms, editors) never navigate on a stray key.
+      if (/^\/app\/(create|bulk|settings|campaigns\/[^/]+\/edit)\/?$/.test(location.pathname)) return;
+      const path = map.get(event.key.toLowerCase());
+      if (!path || path === location.pathname) return;
+      event.preventDefault();
+      navigate(withEmbeddedParams(path, location.search));
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [navigate, location.pathname, location.search]);
+}
+
 export function AppShell() {
   const navigation = useNavigation();
   const location = useLocation();
+  useNavShortcuts();
   const isNavigating = navigation.state !== "idle";
   const appRef = useRef<HTMLDivElement>(null);
   const isCampaignEditor = /^\/app\/campaigns\/[^/]+\/edit\/?$/.test(location.pathname);

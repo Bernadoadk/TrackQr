@@ -1,7 +1,8 @@
-import type { LoaderFunctionArgs, ActionFunctionArgs } from "react-router";
+import type { HeadersFunction, LoaderFunctionArgs, ActionFunctionArgs } from "react-router";
 import { useEffect, useState } from "react";
+import { boundary } from "@shopify/shopify-app-react-router/server";
 import { useLoaderData, useFetcher, useSearchParams } from "react-router";
-import { FREE_PLAN_ID, PLAN_ORDER } from "../lib/plan.constants";
+import { FREE_PLAN_ID, PLAN_ORDER, planIncludes } from "../lib/plan.constants";
 import { Icon } from "../components/ui/Icon";
 import { Button } from "../components/ui/Button";
 import { Card } from "../components/ui/Card";
@@ -9,6 +10,7 @@ import { Segmented } from "../components/ui/Segmented";
 import { useToast } from "../components/ui/Toast";
 import { ConfirmDialog } from "../components/ui/ConfirmDialog";
 import { useReviewRequest } from "../lib/use-review-request";
+import { formatNumber, t, tem, tm, tp } from "../lib/i18n";
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   const [
@@ -155,42 +157,51 @@ const PLAN_META: Record<string, { icon: string; accent: string; tagline: string;
 const FAQS = [
   { q: "Is the Free plan really free?", a: "Yes. The Free plan needs no subscription and never expires: 3 dynamic QR codes, 1 campaign page, a scan counter and PNG downloads in the standard style. Every store starts on it." },
   { q: "What happens to my QR codes if I downgrade or cancel?", a: "Nothing is deleted. QR codes and campaigns beyond the new plan limits are paused automatically (the oldest ones stay active) and come back by themselves as soon as they fit again — after you archive or delete older items, or when you upgrade. Codes designed with a logo or colors are shown in the standard style on the Free plan and get their design back when you upgrade." },
+  { q: "What do customers see when they scan a paused or expired code?", a: "Never an error page. They land on your store home page — or on the fallback page you choose, from the Starter plan — and the scan shows up as a missed scan in your stats." },
+  { q: "Do I need to reprint my codes to change where they go?", a: "No. Every TrackQr code is dynamic: change the destination, add a discount code or a smart routing rule at any time, the printed code stays the same." },
   { q: "Can I change plans later?", a: "Yes. Upgrade or downgrade at any time — Shopify applies the change immediately and prorates the difference." },
   { q: "Are taxes included?", a: "Displayed prices exclude taxes. Shopify adds applicable taxes during checkout based on the store's billing location." },
 ];
 
 function historyLabel(days: number | null) {
-  if (days == null) return "unlimited history";
-  return days >= 365 ? "1-year history" : `${days}-day history`;
+  if (days == null) return t("unlimited history");
+  return days >= 365 ? t("1-year history") : t("{days}-day history", { days });
 }
 
 function featuresFor(plan: PlanRow) {
   const paid = plan.priceMonthly > 0;
   const items: { label: string; included: boolean; hl?: boolean }[] = [
     {
-      label: plan.qrCodeLimit == null ? "Unlimited dynamic QR codes" : `${plan.qrCodeLimit} dynamic QR codes`,
+      label: plan.qrCodeLimit == null ? t("Unlimited dynamic QR codes") : tp(plan.qrCodeLimit, "{count} dynamic QR code", "{count} dynamic QR codes"),
       included: true,
       hl: plan.qrCodeLimit == null,
     },
     {
-      label: plan.campaignLimit == null ? "Unlimited campaign pages" : `${plan.campaignLimit} campaign page${plan.campaignLimit > 1 ? "s" : ""}`,
+      label: plan.campaignLimit == null ? t("Unlimited campaign pages") : tp(plan.campaignLimit, "{count} campaign page", "{count} campaign pages"),
       included: true,
       hl: plan.campaignLimit == null,
     },
     plan.detailedAnalytics
-      ? { label: `Detailed analytics — devices, countries, timeline · ${historyLabel(plan.historyDays)}`, included: true, hl: plan.historyDays == null }
-      : { label: `Scan counter per QR code · ${historyLabel(plan.historyDays)}`, included: true },
+      ? { label: t("Detailed analytics — devices, countries, timeline · {history}", { history: historyLabel(plan.historyDays) }), included: true, hl: plan.historyDays == null }
+      : { label: t("Scan counter per QR code · {history}", { history: historyLabel(plan.historyDays) }), included: true },
     plan.customDesign
-      ? { label: "Logo, colors, shapes, frames & saved design templates", included: true }
-      : { label: "Standard style — dark on white, no logo", included: true },
-    { label: plan.exports ? "PNG, SVG and PDF downloads" : "PNG downloads", included: true },
-    { label: "All QR types: product, cart, promo code, URL, phone, email, SMS, Wi-Fi, vCard", included: true },
-    { label: "UTM parameters for Google Analytics & Shopify Analytics", included: true },
-    { label: "Campaign page editor with email capture & lead notifications", included: true },
-    { label: "CSV exports — scans, QR codes and leads", included: plan.exports },
-    { label: "Shopify order attribution & conversion reporting", included: plan.attribution, hl: plan.attribution },
-    { label: "No “Powered by TrackQr” badge on campaign pages", included: paid },
-    { label: "Priority support", included: plan.prioritySupport },
+      ? { label: t("Logo, colors, shapes, frames & saved design templates"), included: true }
+      : { label: t("Standard style — dark on white, no logo"), included: true },
+    { label: plan.exports ? t("PNG, SVG and PDF downloads · ZIP & print sheets") : t("PNG downloads"), included: true },
+    { label: t("All QR types: product, collection, cart, promo code, store page, URL, Wi-Fi, vCard…"), included: true },
+    { label: t("Auto-applied discount codes, UTM tracking & weekly report"), included: true },
+    { label: t("Campaign pages with email capture & GDPR consent"), included: true },
+    { label: t("Never an error page — scans fall back to your store"), included: true },
+    { label: t("Bulk creation from your catalog or a CSV file"), included: planIncludes(plan.id, "bulkCreate") },
+    { label: t("Custom fallback page & automatic switch after expiry"), included: planIncludes(plan.id, "customFallback") },
+    { label: t("QR codes on order emails & packing slips"), included: planIncludes(plan.id, "orderTracking") },
+    { label: t("CSV exports — scans, QR codes and leads"), included: plan.exports },
+    { label: t("Shopify order attribution — orders & revenue per QR code"), included: plan.attribution, hl: plan.attribution },
+    { label: t("Smart routing by device, country & time · A/B tests"), included: planIncludes(plan.id, "smartRouting"), hl: planIncludes(plan.id, "smartRouting") },
+    { label: t("Leads → Shopify customers · unique reward codes"), included: planIncludes(plan.id, "customerSync") },
+    { label: t("Shopify Flow triggers · GA4 & Meta Pixel on campaigns"), included: planIncludes(plan.id, "automations") },
+    { label: t("No “Powered by TrackQr” badge on campaign pages"), included: paid },
+    { label: t("Priority support"), included: plan.prioritySupport },
   ];
   return items;
 }
@@ -223,7 +234,7 @@ export default function PricingPage() {
   useEffect(() => {
     if (fetcher.state === "idle" && fetcher.data?.ok && fetcher.data.intent === "cancel") {
       setConfirmFreeOpen(false);
-      toast({ title: "Subscription cancelled", desc: "Your store is now on the Free plan. Items beyond its limits were paused.", type: "info" });
+      toast({ title: t("Subscription cancelled"), desc: t("Your store is now on the Free plan. Items beyond its limits were paused."), type: "info" });
     }
   }, [fetcher.state, fetcher.data]);
 
@@ -231,15 +242,15 @@ export default function PricingPage() {
     if (fetcher.state === "idle" && fetcher.data && !fetcher.data.ok) {
       toast({
         type: "error",
-        title: fetcher.data.error === "billing-checkout" ? "Shopify billing blocked" : "Billing action failed",
-        desc: "message" in fetcher.data ? fetcher.data.message : "Try again from Shopify admin.",
+        title: fetcher.data.error === "billing-checkout" ? t("Shopify billing blocked") : t("Billing action failed"),
+        desc: "message" in fetcher.data ? tm(fetcher.data.message) : t("Try again from Shopify admin."),
       });
     }
   }, [fetcher.state, fetcher.data]);
 
   useEffect(() => {
     if (searchParams.get("confirmed") === "1") {
-      toast({ title: "Payment approved", desc: "Shopify is now syncing your TrackQr subscription." });
+      toast({ title: t("Payment approved"), desc: t("Shopify is now syncing your TrackQr subscription.") });
       // The merchant just approved a paid plan — a strong moment for a review request.
       void requestReview("subscription-confirmed");
       const next = new URLSearchParams(searchParams);
@@ -277,18 +288,22 @@ export default function PricingPage() {
     <>
       <ConfirmDialog
         open={confirmFreeOpen}
-        title="Switch to the Free plan?"
+        title={t("Switch to the Free plan?")}
         description={[
-          "Your Shopify subscription will be cancelled (prorated) and the store switches to the Free plan: 3 QR codes, 1 campaign page, standard style, scan counter.",
+          t("Your Shopify subscription will be cancelled (prorated) and the store switches to the Free plan: 3 QR codes, 1 campaign page, standard style, scan counter."),
           qrOverFree > 0 || campaignsOverFree > 0
-            ? `You currently have ${usage.qrUsed} QR codes and ${usage.campaignUsed} campaigns — ${[
-                qrOverFree > 0 ? `${qrOverFree} QR code${qrOverFree > 1 ? "s" : ""}` : "",
-                campaignsOverFree > 0 ? `${campaignsOverFree} campaign${campaignsOverFree > 1 ? "s" : ""}` : "",
-              ].filter(Boolean).join(" and ")} will be paused (the oldest ones stay active). Nothing is deleted.`
-            : "Your current QR codes and campaigns fit within the Free limits, so nothing will be paused.",
+            ? t("You currently have {qrCodes} and {campaigns} — {paused} will be paused (the oldest ones stay active). Nothing is deleted.", {
+                qrCodes: tp(usage.qrUsed, "{count} QR code", "{count} QR codes"),
+                campaigns: tp(usage.campaignUsed, "{count} campaign", "{count} campaigns"),
+                paused: [
+                  qrOverFree > 0 ? tp(qrOverFree, "{count} QR code", "{count} QR codes") : "",
+                  campaignsOverFree > 0 ? tp(campaignsOverFree, "{count} campaign", "{count} campaigns") : "",
+                ].filter(Boolean).join(t(" and ")),
+              })
+            : t("Your current QR codes and campaigns fit within the Free limits, so nothing will be paused."),
         ].join(" ")}
-        confirmLabel="Switch to Free"
-        cancelLabel="Keep my plan"
+        confirmLabel={t("Switch to Free")}
+        cancelLabel={t("Keep my plan")}
         tone="danger"
         loading={busy}
         onClose={() => setConfirmFreeOpen(false)}
@@ -298,13 +313,13 @@ export default function PricingPage() {
       <div className="page-head">
         <div className="page-head-left" style={{ textAlign: "center", marginInline: "auto", flex: "0 1 720px" }}>
           <div className="page-eyebrow" style={{ marginInline: "auto" }}>
-            <Icon name="credit-card" size={11} /> Pricing
+            <Icon name="credit-card" size={11} /> {t("Pricing")}
           </div>
           <h1 className="page-h1">
-            Plans that <span className="em">scale</span> with your scans.
+            {tem("Plans that <em>scale</em> with your scans.")}
           </h1>
           <div className="page-sub" style={{ marginInline: "auto" }}>
-            Every store starts on the Free plan. Upgrade when you need more codes, branding, analytics or Shopify sales attribution — and switch back any time.
+            {t("Every store starts on the Free plan. Upgrade when you need more codes, branding, analytics or Shopify sales attribution — and switch back any time.")}
           </div>
 
           <div className="pricing-cycle">
@@ -312,13 +327,13 @@ export default function PricingPage() {
               value={cycle}
               onChange={(v) => setCycle(v as "monthly" | "annual")}
               options={[
-                { value: "monthly", label: "Monthly" },
-                { value: "annual",  label: "Annual" },
+                { value: "monthly", label: t("Monthly") },
+                { value: "annual",  label: t("Annual") },
               ]}
             />
             <span className={`pricing-cycle-save ${cycle === "annual" ? "on" : ""}`}>
               <Icon name="zap" size={10} />
-              Save 20% · 2+ months free
+              {t("Save 20% · 2+ months free")}
             </span>
           </div>
         </div>
@@ -336,30 +351,30 @@ export default function PricingPage() {
           const currentIdx = PLAN_ORDER.indexOf(currentPlanId as (typeof PLAN_ORDER)[number]);
           const planIdx    = PLAN_ORDER.indexOf(plan.id as (typeof PLAN_ORDER)[number]);
           const direction  = planIdx > currentIdx ? "up" : planIdx < currentIdx ? "down" : "same";
-          const cycleLabel = cycle === "annual" ? "annual" : "monthly";
+          const cycleLabel = cycle === "annual" ? t("annual") : t("monthly");
 
           let ctaLabel: string;
           let ctaVariant: "primary" | "secondary" | "outline" = meta.featured && !isCurrent ? "primary" : isCurrent ? "secondary" : "outline";
           let ctaAction: () => void;
           if (busy) {
-            ctaLabel = "Opening Shopify...";
+            ctaLabel = t("Opening Shopify...");
             ctaAction = () => {};
           } else if (isCurrentFree) {
-            ctaLabel = "Your current plan";
-            ctaAction = () => toast({ title: "You're on the Free plan", desc: "Pick Starter or Growth whenever you need more.", type: "info" });
+            ctaLabel = t("Your current plan");
+            ctaAction = () => toast({ title: t("You're on the Free plan"), desc: t("Pick Starter or Growth whenever you need more."), type: "info" });
           } else if (isFree) {
-            ctaLabel = "Switch to Free";
+            ctaLabel = t("Switch to Free");
             ctaVariant = "outline";
             ctaAction = () => setConfirmFreeOpen(true);
           } else if (isCurrentPaid) {
-            ctaLabel = `Your ${cycleLabel} plan`;
-            ctaAction = () => toast({ title: "You're on this plan", desc: "Billing is managed in Shopify admin → Settings → Apps.", type: "info" });
+            ctaLabel = t("Your {cycle} plan", { cycle: cycleLabel });
+            ctaAction = () => toast({ title: t("You're on this plan"), desc: t("Billing is managed in Shopify admin → Settings → Apps."), type: "info" });
           } else {
             ctaLabel = direction === "up"
-              ? `Upgrade to ${plan.name} ${cycleLabel}`
+              ? t("Upgrade to {plan} {cycle}", { plan: plan.name, cycle: cycleLabel })
               : direction === "down"
-                ? `Switch to ${plan.name} ${cycleLabel}`
-                : `Choose ${plan.name} ${cycleLabel}`;
+                ? t("Switch to {plan} {cycle}", { plan: plan.name, cycle: cycleLabel })
+                : t("Choose {plan} {cycle}", { plan: plan.name, cycle: cycleLabel });
             ctaAction = () => startCheckout(plan.id);
           }
 
@@ -370,10 +385,10 @@ export default function PricingPage() {
               data-accent={meta.accent}
             >
               {meta.badge && !isCurrent && (
-                <div className="pricing-badge"><Icon name="sparkles" size={10} />{meta.badge}</div>
+                <div className="pricing-badge"><Icon name="sparkles" size={10} />{t(meta.badge)}</div>
               )}
               {isCurrent && (
-                <div className="pricing-badge current"><Icon name="circle-check" size={10} />{isFree ? "Current plan" : `Your ${cycleLabel} plan`}</div>
+                <div className="pricing-badge current"><Icon name="circle-check" size={10} />{isFree ? t("Current plan") : t("Your {cycle} plan", { cycle: cycleLabel })}</div>
               )}
 
               <div className="pricing-head">
@@ -382,7 +397,7 @@ export default function PricingPage() {
                 </div>
                 <div>
                   <div className="pricing-name">{plan.name}</div>
-                  <div className="pricing-tag">{meta.tagline}</div>
+                  <div className="pricing-tag">{meta.tagline ? t(meta.tagline) : ""}</div>
                 </div>
               </div>
 
@@ -390,18 +405,18 @@ export default function PricingPage() {
                 <div className="pricing-price">
                   <span className="pricing-currency">$</span>
                   <span className="pricing-amount num">{price}</span>
-                  <span className="pricing-per">/mo</span>
+                  <span className="pricing-per">{t("/mo")}</span>
                 </div>
                 <div className="pricing-billed">
                   {isFree ? (
-                    <>Free forever · no subscription required</>
+                    <>{t("Free forever · no subscription required")}</>
                   ) : cycle === "annual" ? (
                     <>
-                      <span className="num strong">${plan.annualTotal.toLocaleString()}</span> billed annually
+                      <span className="num strong">${formatNumber(plan.annualTotal)}</span> {t("billed annually")}
                       <span className="pricing-strike num">${plan.priceMonthly * 12}</span>
                     </>
                   ) : (
-                    <>Billed monthly · ${plan.annualTotal.toLocaleString()}/yr on annual</>
+                    <>{t("Billed monthly · ${amount}/yr on annual", { amount: formatNumber(plan.annualTotal) })}</>
                   )}
                 </div>
               </div>
@@ -426,12 +441,12 @@ export default function PricingPage() {
                   icon="trash"
                   style={{ marginTop: 8, color: "var(--red-fg)" }}
                 >
-                  Cancel subscription
+                  {t("Cancel subscription")}
                 </Button>
               )}
 
               <div className="pricing-features">
-                <div className="pricing-features-label">Included</div>
+                <div className="pricing-features-label">{t("Included")}</div>
                 <ul>
                   {featuresFor(plan).map((f, i) => (
                     <li key={i} className={f.included ? "" : "off"} data-hl={f.hl ? "true" : "false"}>
@@ -447,36 +462,38 @@ export default function PricingPage() {
       </div>
 
       <div className="pricing-trust">
-        <div><Icon name="gift" size={14} /><span>Free plan, forever — no card required</span></div>
-        <div><Icon name="credit-card" size={14} /><span>Billed through Shopify</span></div>
-        <div title={billingModeDescription}>
+        <div><Icon name="gift" size={14} /><span>{t("Free plan, forever — no card required")}</span></div>
+        <div><Icon name="credit-card" size={14} /><span>{t("Billed through Shopify")}</span></div>
+        <div title={tm(billingModeDescription)}>
           <Icon name={billingTestMode ? "settings" : "lock"} size={14} />
-          <span>Billing mode: {billingMode}</span>
+          <span>{t("Billing mode:")} {billingMode === "development" ? t("test") : t("live")}</span>
         </div>
-        <div><Icon name="zap" size={14} /><span>Cancel any time</span></div>
+        <div><Icon name="zap" size={14} /><span>{t("Cancel any time")}</span></div>
       </div>
 
       <div className="section">
-        <h2 className="section-h">Frequently Asked Questions</h2>
+        <h2 className="section-h">{t("Frequently Asked Questions")}</h2>
         <Card>
           {FAQS.map((f, i) => (
-            <div
+            <button
+              type="button"
               key={f.q}
+              className="faq-row"
+              aria-expanded={openFaq === f.q}
               style={{
                 borderBottom: i === FAQS.length - 1 ? 0 : "1px solid var(--border-soft)",
                 padding: "14px 18px",
-                cursor: "default",
               }}
               onClick={() => setOpenFaq(openFaq === f.q ? null : f.q)}
             >
               <div className="flex items-center justify-between">
-                <div className="strong" style={{ fontSize: 13.5 }}>{f.q}</div>
-                <Icon name={openFaq === f.q ? "chevron-up" : "chevron-down"} size={14} style={{ color: "var(--fg-subtle)" }} />
+                <div className="strong" style={{ fontSize: 13.5, textAlign: "left" }}>{t(f.q)}</div>
+                <Icon name={openFaq === f.q ? "chevron-up" : "chevron-down"} size={14} style={{ color: "var(--fg-subtle)", flexShrink: 0, marginLeft: 12 }} />
               </div>
               {openFaq === f.q && (
-                <div className="text-sm muted mt-2" style={{ maxWidth: 720 }}>{f.a}</div>
+                <div className="text-sm muted mt-2" style={{ maxWidth: 720, textAlign: "left" }}>{t(f.a)}</div>
               )}
-            </div>
+            </button>
           ))}
         </Card>
       </div>
@@ -484,3 +501,7 @@ export default function PricingPage() {
     </>
   );
 }
+
+export const headers: HeadersFunction = (headersArgs) => {
+  return boundary.headers(headersArgs);
+};

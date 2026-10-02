@@ -1,0 +1,28 @@
+# Shopify Flow trigger — fired by app/lib/attribution.server.ts (Growth plan).
+# Payload keys must match the field keys below exactly (see app/lib/flow.server.ts).
+[[extensions]]
+name = "Order attributed to QR code"
+type = "flow_trigger"
+handle = "trackqr-order-attributed"
+uid = "66281260-d8a7-0f4b-bcaa-c9a6a9160a1e80b23e80"
+description = "Runs when TrackQr attributes a Shopify order to a QR code scan."
+
+[settings]
+
+  [[settings.fields]]
+  type = "order_reference"
+
+  [[settings.fields]]
+  type = "single_line_text_field"
+  key = "QR code name"
+  description = "Name of the QR code that was scanned."
+
+  [[settings.fields]]
+  type = "url"
+  key = "QR code link"
+  description = "Scan link encoded in the QR code."
+
+  [[settings.fields]]
+  type = "number_decimal"
+  key = "Order amount"
+  description = "Order total in the shop currency."

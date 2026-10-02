@@ -17,7 +17,25 @@ export function Card({ accent, children, className = "", hoverLift, style, onCli
     hoverLift && "hover-lift",
     className,
   ].filter(Boolean).join(" ");
-  return <div className={cls} style={style} onClick={onClick}>{children}</div>;
+  if (onClick) {
+    return (
+      <div
+        className={cls}
+        style={style}
+        role="button"
+        tabIndex={0}
+        onClick={onClick}
+        onKeyDown={e => {
+          if (e.target !== e.currentTarget || (e.key !== "Enter" && e.key !== " ")) return;
+          e.preventDefault();
+          onClick();
+        }}
+      >
+        {children}
+      </div>
+    );
+  }
+  return <div className={cls} style={style}>{children}</div>;
 }
 
 interface CardHeadProps {

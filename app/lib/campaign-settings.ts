@@ -29,6 +29,10 @@ export type CampaignPageSettings = {
   xUrl: string;
   websiteUrl: string;
   showPoweredBy: boolean;
+  /** Google Analytics 4 measurement id (G-XXXX) — Growth. */
+  ga4MeasurementId: string;
+  /** Meta (Facebook) Pixel id — Growth. */
+  metaPixelId: string;
 };
 
 export const DEFAULT_CAMPAIGN_PAGE_SETTINGS: CampaignPageSettings = {
@@ -57,6 +61,8 @@ export const DEFAULT_CAMPAIGN_PAGE_SETTINGS: CampaignPageSettings = {
   xUrl: "",
   websiteUrl: "",
   showPoweredBy: true,
+  ga4MeasurementId: "",
+  metaPixelId: "",
 };
 
 function choice<T extends string>(value: unknown, allowed: readonly T[], fallback: T): T {
@@ -98,17 +104,35 @@ export function normalizeCampaignPageSettings(value: unknown): CampaignPageSetti
     xUrl: text(raw.xUrl, DEFAULT_CAMPAIGN_PAGE_SETTINGS.xUrl),
     websiteUrl: text(raw.websiteUrl, DEFAULT_CAMPAIGN_PAGE_SETTINGS.websiteUrl),
     showPoweredBy: typeof raw.showPoweredBy === "boolean" ? raw.showPoweredBy : DEFAULT_CAMPAIGN_PAGE_SETTINGS.showPoweredBy,
+    ga4MeasurementId: pattern(raw.ga4MeasurementId, /^G-[A-Z0-9]{4,16}$/),
+    metaPixelId: pattern(raw.metaPixelId, /^\d{6,20}$/),
   };
 }
 
+/** Keep a tracking id only when it has the expected shape (it ends up in a script). */
+function pattern(value: unknown, re: RegExp): string {
+  const v = typeof value === "string" ? value.trim().toUpperCase() : "";
+  return re.test(v) ? v : "";
+}
+
+export interface CampaignPlanOptions {
+  /** Free plan: the "Powered by TrackQr" watermark is always shown. */
+  forcePoweredBy: boolean;
+  /** Tracking pixels are a Growth feature — dropped otherwise. */
+  pixels: boolean;
+}
+
 /**
- * The "Powered by TrackQr" watermark is forced on stores without a paid
- * subscription (Free plan) and removable otherwise.
+ * Settings as the public page renders them for the plan of the store: the
+ * "Powered by TrackQr" watermark is forced on stores without a paid
+ * subscription (Free plan) and hidden on paid plans; pixels need Growth.
  */
-export function campaignPageSettingsForPlan(value: unknown, forcePoweredBy: boolean): CampaignPageSettings {
+export function campaignPageSettingsForPlan(value: unknown, opts: CampaignPlanOptions): CampaignPageSettings {
   const settings = normalizeCampaignPageSettings(value);
   return {
     ...settings,
-    showPoweredBy: forcePoweredBy,
+    showPoweredBy: opts.forcePoweredBy,
+    ga4MeasurementId: opts.pixels ? settings.ga4MeasurementId : "",
+    metaPixelId: opts.pixels ? settings.metaPixelId : "",
   };
 }

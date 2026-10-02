@@ -18,6 +18,10 @@ import { renderQrSvg } from "../lib/qr-render";
 import { LABEL_FONTS, LABEL_FONT_GROUPS, DEFAULT_FONT, getLabelFont } from "../lib/label-fonts";
 import { DEFAULT_CAMPAIGN_PAGE_SETTINGS, campaignPageSettingsForPlan, normalizeCampaignPageSettings, type CampaignPageSettings } from "../lib/campaign-settings";
 import { useReviewRequest } from "../lib/use-review-request";
+import { campaignPreviewPath } from "../lib/signing.server";
+import { FeatureLock } from "../components/ui/FeatureLock";
+import { RangeSlider } from "../components/ui/RangeSlider";
+import { formatNumber, t, tm, tp } from "../lib/i18n";
 
 export const loader = async ({ request, params }: LoaderFunctionArgs) => {
   const { shop } = await requireShop(request);
@@ -40,6 +44,13 @@ export const loader = async ({ request, params }: LoaderFunctionArgs) => {
     },
     // The "Powered by TrackQr" watermark is forced on the Free plan.
     isFreePlan: entitlements.status !== "active",
+    planFeatures: {
+      leadRewards: entitlements.leadRewards,
+      campaignPixels: entitlements.campaignPixels,
+      customerSync: entitlements.customerSync,
+    },
+    // Signed 24h link: the preview tab has no Shopify session.
+    previewPath: campaignPreviewPath(campaign.id),
     shopDomain: shop.domain,
     qrChoices: qrChoices.map(q => {
       // Embedded QR previews follow the plan's design rules (standard style without `customDesign`).
@@ -166,15 +177,16 @@ function pickedResource(value: unknown): ShopifyPickedResource | null {
 
 function uid(prefix = "b") { return prefix + Math.random().toString(36).slice(2, 8); }
 
+// Shown as initials (L / C / R, S / M / L) of the translated words.
 const ALIGN_OPTS = [
-  { value: "left",   label: "L" },
-  { value: "center", label: "C" },
-  { value: "right",  label: "R" },
+  { value: "left",   label: "Left" },
+  { value: "center", label: "Center" },
+  { value: "right",  label: "Right" },
 ];
 const PADDING_OPTS = [
-  { value: "sm", label: "S" },
-  { value: "md", label: "M" },
-  { value: "lg", label: "L" },
+  { value: "sm", label: "Small" },
+  { value: "md", label: "Medium" },
+  { value: "lg", label: "Large" },
 ];
 const BG_OPTS = [
   { value: "surface",    label: "Default", swatch: "var(--bg-surface)",  border: "var(--border)" },
@@ -389,19 +401,19 @@ type BlockDefaults = {
 };
 
 const BLOCK_DEFAULTS: Record<BlockType, BlockDefaults> = {
-  hero:     { defaults: () => ({ eyebrow: "Limited time", title: "Limited drop · 24 hours only", subtitle: "Aurora's spring collection — exclusive scan-to-shop access.", cta: "Shop the drop", ctaHref: "https://", ctaVariant: "primary", headingSize: "xl", bodySize: "lg" }), layout: () => ({ padding: "lg", align: "center", bg: "dark" }) },
-  timer:    { defaults: () => ({ label: "Drop ends in", endsAt: new Date(Date.now() + 3 * 24 * 60 * 60 * 1000).toISOString() }),                                                                    layout: () => ({ padding: "md", align: "center", bg: "sunken" }) },
-  products: { defaults: () => ({ title: "Featured pieces", mode: "products", count: 3, products: [], collection: null, cta: "Shop selected", cardBgColor: "#FFFFFF" }),                         layout: () => ({ padding: "md", align: "left",   bg: "surface" }) },
-  capture:  { defaults: () => ({ title: "Get early access", subtitle: "Drop your email — we'll text you when it's live.", placeholder: "you@email.com", cta: "Notify me", merchantEmail: "", mailSubject: "New campaign lead" }),   layout: () => ({ padding: "md", align: "center", bg: "sunken" }) },
-  promo:    { defaults: () => ({ eyebrow: "Use code", code: "AURORA15", title: "15% off your first order", autoApply: true, cta: "Apply discount", href: "" }),                                    layout: () => ({ padding: "md", align: "center", bg: "surface" }) },
-  text:     { defaults: () => ({ heading: "Why this drop is different", body: "Hand-cut, hand-stitched, made in batches of 200." }),                                                               layout: () => ({ padding: "md", align: "left",   bg: "surface" }) },
-  button:   { defaults: () => ({ label: "Shop the collection", href: "https://", variant: "primary", icon: true }),                                                                                layout: () => ({ padding: "sm", align: "center", bg: "surface" }) },
+  hero:     { defaults: () => ({ eyebrow: t("Limited time"), title: t("Limited drop · 24 hours only"), subtitle: t("Aurora's spring collection — exclusive scan-to-shop access."), cta: t("Shop the drop"), ctaHref: "https://", ctaVariant: "primary", headingSize: "xl", bodySize: "lg" }), layout: () => ({ padding: "lg", align: "center", bg: "dark" }) },
+  timer:    { defaults: () => ({ label: t("Drop ends in"), endsAt: new Date(Date.now() + 3 * 24 * 60 * 60 * 1000).toISOString() }),                                                                    layout: () => ({ padding: "md", align: "center", bg: "sunken" }) },
+  products: { defaults: () => ({ title: t("Featured pieces"), mode: "products", count: 3, products: [], collection: null, cta: t("Shop selected"), cardBgColor: "#FFFFFF" }),                         layout: () => ({ padding: "md", align: "left",   bg: "surface" }) },
+  capture:  { defaults: () => ({ title: t("Get early access"), subtitle: t("Drop your email — we'll let you know when it's live."), placeholder: "you@email.com", cta: t("Notify me"), merchantEmail: "", mailSubject: t("New campaign lead"), consentEnabled: true, consentRequired: false, rewardEnabled: false, rewardPercent: 10 }),   layout: () => ({ padding: "md", align: "center", bg: "sunken" }) },
+  promo:    { defaults: () => ({ eyebrow: t("Use code"), code: "AURORA15", title: t("15% off your first order"), autoApply: true, cta: t("Apply discount"), href: "" }),                                    layout: () => ({ padding: "md", align: "center", bg: "surface" }) },
+  text:     { defaults: () => ({ heading: t("Why this drop is different"), body: t("Hand-cut, hand-stitched, made in batches of 200.") }),                                                               layout: () => ({ padding: "md", align: "left",   bg: "surface" }) },
+  button:   { defaults: () => ({ label: t("Shop the collection"), href: "https://", variant: "primary", icon: true }),                                                                                layout: () => ({ padding: "sm", align: "center", bg: "surface" }) },
   image:    { defaults: () => ({ src: "", assetId: "", aspect: "16:9", fit: "cover", caption: "", alt: "" }),                                                                                     layout: () => ({ padding: "md", align: "center", bg: "surface" }) },
-  video:    { defaults: () => ({ title: "Watch the drop", src: "", autoplay: false, controls: true }),                                                                                             layout: () => ({ padding: "md", align: "center", bg: "surface" }) },
-  reviews:  { defaults: () => ({ title: "What customers say", items: [{ name: "Anna L.", rating: 5, text: "Fits like a glove. Better quality than expected.", verified: true }, { name: "Marcus T.", rating: 5, text: "The fabric is unreal. Already ordered a second.", verified: true }, { name: "Priya S.", rating: 4, text: "Beautiful piece. Shipping took a little while.", verified: false }] }), layout: () => ({ padding: "md", align: "center", bg: "sunken" }) },
-  faq:      { defaults: () => ({ title: "Questions, answered", expanded: false, items: [{ q: "When will my order ship?", a: "Within 2 business days. You'll get tracking by email." }, { q: "What's the return policy?", a: "30 days, no questions asked. Items must be unworn." }] }), layout: () => ({ padding: "md", align: "left", bg: "surface" }) },
-  urgency:  { defaults: () => ({ label: "Only 14 left", message: "Once they're gone, they're gone.", tone: "danger", icon: "alert-triangle" }),                                                    layout: () => ({ padding: "sm", align: "center", bg: "surface" }) },
-  qr:       { defaults: () => ({ title: "Scan to continue", subtitle: "Open this page on your phone to shop.", qrId: "", size: "md" }),                                                            layout: () => ({ padding: "md", align: "center", bg: "sunken" }) },
+  video:    { defaults: () => ({ title: t("Watch the drop"), src: "", autoplay: false, controls: true }),                                                                                             layout: () => ({ padding: "md", align: "center", bg: "surface" }) },
+  reviews:  { defaults: () => ({ title: t("What customers say"), items: [{ name: t("Customer name"), rating: 5, text: t("Paste a real customer review here."), verified: false }, { name: t("Customer name"), rating: 5, text: t("Paste another real review here."), verified: false }] }), layout: () => ({ padding: "md", align: "center", bg: "sunken" }) },
+  faq:      { defaults: () => ({ title: t("Questions, answered"), expanded: false, items: [{ q: t("When will my order ship?"), a: t("Within 2 business days. You'll get tracking by email.") }, { q: t("What's the return policy?"), a: t("30 days, no questions asked. Items must be unworn.") }] }), layout: () => ({ padding: "md", align: "left", bg: "surface" }) },
+  urgency:  { defaults: () => ({ label: t("Only 14 left"), message: t("Once they're gone, they're gone."), tone: "danger", icon: "alert-triangle" }),                                                    layout: () => ({ padding: "sm", align: "center", bg: "surface" }) },
+  qr:       { defaults: () => ({ title: t("Scan to continue"), subtitle: t("Open this page on your phone to shop."), qrId: "", size: "md" }),                                                            layout: () => ({ padding: "md", align: "center", bg: "sunken" }) },
 };
 
 function makeBlock(type: BlockType): Block {
@@ -413,19 +425,6 @@ const STARTER_BLOCKS: BlockType[] = ["hero", "timer", "products", "capture", "pr
 
 /* ══════════════ Block Previews ══════════════ */
 
-function Stars({ value = 5, size = 14 }: { value?: number; size?: number }) {
-  return (
-    <span style={{ display: "inline-flex", gap: 1 }}>
-      {Array.from({ length: 5 }, (_, i) => (
-        <svg key={i} viewBox="0 0 24 24" width={size} height={size}
-          fill={i < value ? "currentColor" : "transparent"}
-          stroke="currentColor" strokeWidth="1.75" strokeLinejoin="round" strokeLinecap="round">
-          <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2" />
-        </svg>
-      ))}
-    </span>
-  );
-}
 
 function HeroPreview({ p, layout }: { p: Record<string, unknown>; layout: Block["layout"] }) {
   const href = safeHref(p.ctaHref);
@@ -448,11 +447,11 @@ function HeroPreview({ p, layout }: { p: Record<string, unknown>; layout: Block[
 function TimerPreview({ p, layout }: { p: Record<string, unknown>; layout: Block["layout"] }) {
   const [now, setNow] = useState(Date.now());
   useEffect(() => {
-    const t = window.setInterval(() => setNow(Date.now()), 1000);
-    return () => window.clearInterval(t);
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
   }, []);
   const parts = countdownParts(p.endsAt || p.endsIn, now);
-  const labels = ["Days", "Hours", "Min", "Sec"];
+  const labels = [t("Days"), t("Hours"), t("Min"), t("Sec")];
   return (
     <div className="tqr-section block-content" style={blockStyle(p, layout)}>
       {!!p.label && <div className="tqr-eyebrow center" style={{ color: cssColor(p, "eyebrowColor"), ...textRoleStyle(p, "eyebrow") }}>{String(p.label)}</div>}
@@ -480,16 +479,16 @@ function ProductsPreview({ p, layout }: { p: Record<string, unknown>; layout: Bl
     return (
       <div className="tqr-section block-content" style={blockStyle(p, layout)}>
         <h2 style={headingStyle(p)}>{String(p.title)}</h2>
-        <a className="tqr-collection-card" href="#" onClick={e => e.preventDefault()} style={cardInlineStyle(p)}>
+        <div className="tqr-collection-card" style={cardInlineStyle(p)}>
           <div className="tqr-collection-img">
             {collection.image ? <img src={collection.image} alt="" /> : null}
           </div>
           <div>
             <div className="tqr-product-name" style={{ color: cssColor(p, "cardTextColor") }}>{collection.title}</div>
-            <div className="tqr-product-price" style={{ color: cssColor(p, "priceColor") }}>Collection</div>
+            <div className="tqr-product-price" style={{ color: cssColor(p, "priceColor") }}>{t("Collection")}</div>
           </div>
-        </a>
-        <a href="#" onClick={e => e.preventDefault()} className="tqr-btn secondary" style={buttonInlineStyle(p)}>{String(p.cta || "Shop collection")} →</a>
+        </div>
+        <span className="tqr-btn secondary" style={buttonInlineStyle(p)}>{String(p.cta || t("Shop collection"))} →</span>
       </div>
     );
   }
@@ -498,16 +497,16 @@ function ProductsPreview({ p, layout }: { p: Record<string, unknown>; layout: Bl
       <h2 style={headingStyle(p)}>{String(p.title)}</h2>
       <div className="tqr-products">
         {products.map((product, i) => (
-          <a key={product.id || i} className="tqr-product" href="#" onClick={e => e.preventDefault()} style={cardInlineStyle(p)}>
+          <div key={product.id || i} className="tqr-product" style={cardInlineStyle(p)}>
             <div className="tqr-product-img">
               {product.image ? <img src={product.image} alt="" /> : null}
             </div>
             <div className="tqr-product-name" style={{ color: cssColor(p, "cardTextColor") }}>{product.title}</div>
             <div className="tqr-product-price" style={{ color: cssColor(p, "priceColor") }}>{prices[i % prices.length]}</div>
-          </a>
+          </div>
         ))}
       </div>
-      {(collection || selectedProducts.length > 0) && <a href="#" onClick={e => e.preventDefault()} className="tqr-btn secondary" style={buttonInlineStyle(p)}>{String(p.cta || "Shop selected")} →</a>}
+      {(collection || selectedProducts.length > 0) && <span className="tqr-btn secondary" style={buttonInlineStyle(p)}>{String(p.cta || t("Shop selected"))} →</span>}
     </div>
   );
 }
@@ -529,8 +528,19 @@ function CapturePreview({ p, layout }: { p: Record<string, unknown>; layout: Blo
               "--placeholder-color": cssColor(p, "placeholderColor"),
             } as React.CSSProperties}
           />
-          <button type="button" className="tqr-btn primary" style={buttonInlineStyle(p)}>{String(p.cta || "Notify me")}</button>
+          <button type="button" className="tqr-btn primary" style={buttonInlineStyle(p)}>{String(p.cta || t("Notify me"))}</button>
         </div>
+        {p.consentEnabled !== false && (
+          <div className="capture-consent-preview">
+            <span className="capture-consent-box" aria-hidden="true" />
+            <span>{String(p.consentText || t("I agree to receive emails from the store. I can unsubscribe at any time."))}</span>
+          </div>
+        )}
+        {p.rewardEnabled === true && (
+          <div className="capture-reward-preview">
+            <Icon name="gift" size={12} /> {t("{value}% off code revealed after sign-up", { value: Number(p.rewardPercent) || 10 })}
+          </div>
+        )}
       </div>
     </div>
   );
@@ -542,7 +552,7 @@ function PromoPreview({ p, layout }: { p: Record<string, unknown>; layout: Block
       {!!p.eyebrow && <div className="tqr-eyebrow" style={{ color: cssColor(p, "eyebrowColor"), ...textRoleStyle(p, "eyebrow") }}>{String(p.eyebrow)}</div>}
       <div className="tqr-promo" style={{ color: accentColor(p), borderColor: accentColor(p) }}>{String(p.code)}</div>
       <p style={bodyStyle(p)}>{String(p.title)}</p>
-      {!!p.cta && <a href="#" onClick={e => e.preventDefault()} className="tqr-btn secondary" style={buttonInlineStyle(p)}>{String(p.cta)}</a>}
+      {!!p.cta && <span className="tqr-btn secondary" style={buttonInlineStyle(p)}>{String(p.cta)}</span>}
     </div>
   );
 }
@@ -560,9 +570,9 @@ function ButtonPreview({ p, layout }: { p: Record<string, unknown>; layout: { al
   return (
     <div className="tqr-section block-content" style={blockStyle(p, layout)}>
       <div className={layout?.align === "left" ? "" : layout?.align === "right" ? "right" : "center"}>
-        <a href="#" onClick={e => e.preventDefault()} className={`tqr-btn ${String(p.variant ?? "primary")}`} style={buttonInlineStyle(p)}>
-          {String(p.label || "Click me")}{p.icon ? " →" : ""}
-        </a>
+        <span className={`tqr-btn ${String(p.variant ?? "primary")}`} style={buttonInlineStyle(p)}>
+          {String(p.label || t("Click me"))}{p.icon ? " →" : ""}
+        </span>
       </div>
     </div>
   );
@@ -576,7 +586,7 @@ function ImagePreview({ p, layout }: { p: Record<string, unknown>; layout: Block
           <img src={String(p.src)} alt={String(p.alt || "")} style={{ objectFit: (p.fit as "cover" | "contain") || "cover" }} />
         </div>
       ) : (
-        <div className="tqr-placeholder" data-aspect={String(p.aspect || "16:9")}>Image placeholder</div>
+        <div className="tqr-placeholder" data-aspect={String(p.aspect || "16:9")}>{t("Image placeholder")}</div>
       )}
       {!!p.caption && <div className="tqr-caption">{String(p.caption)}</div>}
     </div>
@@ -591,8 +601,8 @@ function VideoPreview({ p, layout }: { p: Record<string, unknown>; layout: Block
       {src ? (
         src.match(/\.(mp4|webm|ogg)(\?.*)?$/i)
           ? <video src={src} controls={p.controls !== false} muted autoPlay={!!p.autoplay} style={{ width: "100%", aspectRatio: "16/9", borderRadius: 8 }} />
-          : <iframe src={src} title={String(p.title || "Video")} style={{ width: "100%", aspectRatio: "16/9", border: 0, borderRadius: 8 }} allowFullScreen />
-      ) : <div className="tqr-placeholder">Video placeholder</div>}
+          : <iframe src={src} title={String(p.title || t("Video"))} style={{ width: "100%", aspectRatio: "16/9", border: 0, borderRadius: 8 }} allowFullScreen />
+      ) : <div className="tqr-placeholder">{t("Video placeholder")}</div>}
     </div>
   );
 }
@@ -602,17 +612,17 @@ function ReviewsPreview({ p, layout }: { p: Record<string, unknown>; layout: { a
   const avg = items.reduce((s, r) => s + (r.rating || 5), 0) / Math.max(items.length, 1);
   return (
     <div className="tqr-section block-content" style={blockStyle(p, layout)}>
-      <h2 style={{ textAlign: "center", ...headingStyle(p) }}>{String(p.title || "What customers say")}</h2>
+      <h2 style={{ textAlign: "center", ...headingStyle(p) }}>{String(p.title || t("What customers say"))}</h2>
       <div className="tqr-reviews-meta">
         <span className="stars" style={{ color: accentColor(p) }}>{"★".repeat(Math.round(avg))}</span>
-          <span>{avg.toFixed(1)} · {items.length} reviews</span>
+          <span>{formatNumber(avg, { minimumFractionDigits: 1, maximumFractionDigits: 1 })} · {tp(items.length, "{count} review", "{count} reviews")}</span>
       </div>
       <div className="tqr-reviews">
         {items.slice(0, 3).map((r, i) => (
           <div key={i} className="tqr-review" style={cardInlineStyle(p)}>
             <div className="stars" style={{ color: accentColor(p) }}>{"★".repeat(r.rating || 5)}</div>
             <p style={{ color: cssColor(p, "cardTextColor") }}>&quot;{r.text}&quot;</p>
-            <div className="name">— {r.name}{r.verified ? " · ✓ Verified" : ""}</div>
+            <div className="name">— {r.name}{r.verified ? t(" · ✓ Verified") : ""}</div>
           </div>
         ))}
       </div>
@@ -639,7 +649,7 @@ function UrgencyPreview({ p, layout }: { p: Record<string, unknown>; layout: Blo
   return (
     <div className="tqr-section block-content" style={blockStyle(p, layout)}>
       <div className={`tqr-urgency ${String(p.tone ?? "danger")}`}>
-        <b>{String(p.label || "Hurry")}</b> {String(p.message)}
+        <b>{String(p.label || t("Hurry"))}</b> {String(p.message)}
       </div>
     </div>
   );
@@ -651,14 +661,14 @@ function QrPreview({ p, layout, qrChoices }: { p: Record<string, unknown>; layou
   return (
     <div className="tqr-section block-content" style={blockStyle(p, layout)}>
       <div className="center">
-        {!!p.title && <h3 style={headingStyle(p, 22)}>{String(p.title || "Scan to continue")}</h3>}
+        {!!p.title && <h3 style={headingStyle(p, 22)}>{String(p.title || t("Scan to continue"))}</h3>}
         {!!p.subtitle && <p style={bodyStyle(p)}>{String(p.subtitle)}</p>}
         {selected ? (
           <div className={`qr-render-output tqr-qr ${String(p.size || "md")}`} dangerouslySetInnerHTML={{ __html: svg }} />
         ) : (
           <div className="lp-empty-state">
             <Icon name="qr-code" size={20} />
-            <span>{qrChoices.length ? "Select a QR code in the properties panel." : "Create a QR code first, then select it here."}</span>
+            <span>{qrChoices.length ? t("Select a QR code in the properties panel.") : t("Create a QR code first, then select it here.")}</span>
           </div>
         )}
       </div>
@@ -684,7 +694,7 @@ function renderBlock(b: Block, qrChoices: MerchantQrChoice[]) {
     case "faq":      return <FaqPreview p={p} layout={l} />;
     case "urgency":  return <UrgencyPreview p={p} layout={l} />;
     case "qr":       return <QrPreview p={p} layout={l} qrChoices={qrChoices} />;
-    default:         return <div style={{ padding: 32, textAlign: "center", color: "var(--fg-muted)" }}>Unknown block</div>;
+    default:         return <div style={{ padding: 32, textAlign: "center", color: "var(--fg-muted)" }}>{t("Unknown block")}</div>;
   }
 }
 
@@ -734,7 +744,7 @@ function TrackQrWatermark() {
   return (
     <div className="tqr-powered">
       <img className="tqr-powered-logo" src="/TrackQr.png" alt="" />
-      <span>Powered by <b>TrackQR</b></span>
+      <span>{t("Powered by")} <b>TrackQR</b></span>
     </div>
   );
 }
@@ -757,7 +767,7 @@ function CampaignFooterPreview({ settings }: { settings: CampaignPageSettings })
                 <span
                   key={link.key}
                   className="tqr-social-link"
-                  title={link.label}
+                  title={t(link.label)}
                   style={{ color: settings.socialIconColorMode === "brand" ? link.color : undefined }}
                 >
                   <SocialIcon path={link.path} />
@@ -791,8 +801,8 @@ function Repeater<T extends Record<string, unknown>>({ items, onChange, addLabel
       {items.map((it, i) => (
         <div key={i} className="prop-repeater-item">
           <div className="prop-repeater-head">
-            <span className="prop-repeater-num">Item {i + 1}</span>
-            <button className="prop-repeater-remove" onClick={() => remove(i)} disabled={items.length <= 1} title="Remove">
+            <span className="prop-repeater-num">{t("Item {n}", { n: i + 1 })}</span>
+            <button className="prop-repeater-remove" onClick={() => remove(i)} disabled={items.length <= 1} title={t("Remove")}>
               <Icon name="trash" size={11} />
             </button>
           </div>
@@ -819,25 +829,25 @@ function EditorToggle({ on, onChange }: { on: boolean; onChange: (v: boolean) =>
 
 function HeroFields({ p, set }: { p: Record<string, unknown>; set: (k: string, v: unknown) => void }) {
   return (<>
-    <Field label="Eyebrow"><Input value={String(p.eyebrow || "")} onChange={e => set("eyebrow", e.target.value)} placeholder="Limited time" /></Field>
-    <Field label="Title" required><Input value={String(p.title)} onChange={e => set("title", e.target.value)} /></Field>
-    <Field label="Subtitle"><Textarea value={String(p.subtitle || "")} onChange={e => set("subtitle", e.target.value)} rows={2} /></Field>
-    <Field label="Call to action"><Input value={String(p.cta)} onChange={e => set("cta", e.target.value)} /></Field>
-    <Field label="CTA URL" hint="Where the hero button sends visitors."><Input value={String(p.ctaHref || "")} onChange={e => set("ctaHref", e.target.value)} placeholder="https://" icon="link" /></Field>
-    <Field label="CTA style">
+    <Field label={t("Eyebrow")}><Input value={String(p.eyebrow || "")} onChange={e => set("eyebrow", e.target.value)} placeholder={t("Limited time")} /></Field>
+    <Field label={t("Title")} required><Input value={String(p.title)} onChange={e => set("title", e.target.value)} /></Field>
+    <Field label={t("Subtitle")}><Textarea value={String(p.subtitle || "")} onChange={e => set("subtitle", e.target.value)} rows={2} /></Field>
+    <Field label={t("Call to action")}><Input value={String(p.cta)} onChange={e => set("cta", e.target.value)} /></Field>
+    <Field label={t("CTA URL")} hint={t("Where the hero button sends visitors.")}><Input value={String(p.ctaHref || "")} onChange={e => set("ctaHref", e.target.value)} placeholder="https://" icon="link" /></Field>
+    <Field label={t("CTA style")}>
       <Select value={String(p.ctaVariant || "primary")} onChange={e => set("ctaVariant", e.target.value)}>
-        <option value="primary">Primary</option>
-        <option value="secondary">Secondary</option>
-        <option value="outline">Outline</option>
-        <option value="ghost">Ghost</option>
+        <option value="primary">{t("Primary")}</option>
+        <option value="secondary">{t("Secondary")}</option>
+        <option value="outline">{t("Outline")}</option>
+        <option value="ghost">{t("Ghost")}</option>
       </Select>
     </Field>
   </>);
 }
 function TimerFields({ p, set }: { p: Record<string, unknown>; set: (k: string, v: unknown) => void }) {
   return (<>
-    <Field label="Label (optional)"><Input value={String(p.label || "")} onChange={e => set("label", e.target.value)} placeholder="Drop ends in" /></Field>
-    <Field label="End date and time" hint="The countdown calculates DD · HH · MM · SS automatically.">
+    <Field label={t("Label (optional)")}><Input value={String(p.label || "")} onChange={e => set("label", e.target.value)} placeholder={t("Drop ends in")} /></Field>
+    <Field label={t("End date and time")} hint={t("The countdown calculates DD · HH · MM · SS automatically.")}>
       <Input type="datetime-local" value={dateTimeLocalValue(p.endsAt || p.endsIn)} onChange={e => set("endsAt", fromDateTimeLocal(e.target.value))} />
     </Field>
   </>);
@@ -847,11 +857,11 @@ function ProductsFields({ p, set, actions }: { p: Record<string, unknown>; set: 
   const collection = pickedResource(p.collection);
   const mode = String(p.mode || "products");
   return (<>
-    <Field label="Section title"><Input value={String(p.title)} onChange={e => set("title", e.target.value)} /></Field>
-    <Field label="Source" hint="Choose real Shopify resources from this merchant store.">
-      <Segmented value={mode} onChange={v => set("mode", v)} options={[{ value: "products", label: "Products" }, { value: "collection", label: "Collection" }]} />
+    <Field label={t("Section title")}><Input value={String(p.title)} onChange={e => set("title", e.target.value)} /></Field>
+    <Field label={t("Source")} hint={t("Choose real Shopify resources from this merchant store.")}>
+      <Segmented value={mode} onChange={v => set("mode", v)} options={[{ value: "products", label: t("Products") }, { value: "collection", label: t("Collection") }]} />
     </Field>
-    <Field label={`Number of products · ${Math.max(1, Math.min(10, numeric(p.count, 3)))}`} hint="Preview can show 1 to 10 products.">
+    <Field label={t("Number of products · {count}", { count: Math.max(1, Math.min(10, numeric(p.count, 3))) })} hint={t("Preview can show 1 to 10 products.")}>
       <input
         type="range"
         min={1}
@@ -864,85 +874,126 @@ function ProductsFields({ p, set, actions }: { p: Record<string, unknown>; set: 
       />
     </Field>
     {mode === "products" ? (
-      <Field label="Products" hint="Visitors see the products you choose here.">
+      <Field label={t("Products")} hint={t("Visitors see the products you choose here.")}>
         <ResourcePickButton
           icon="package"
-          emptyLabel="Select products"
+          emptyLabel={t("Select products")}
           items={products}
           onPick={() => actions.pickProducts(items => set("products", items))}
           onClear={() => set("products", [])}
         />
       </Field>
     ) : (
-      <Field label="Collection" hint="The collection controls the shop destination and preview label.">
+      <Field label={t("Collection")} hint={t("The collection controls the shop destination and preview label.")}>
         <ResourcePickButton
           icon="grid"
-          emptyLabel="Select collection"
+          emptyLabel={t("Select collection")}
           items={collection ? [collection] : []}
           onPick={() => actions.pickCollection(item => set("collection", item))}
           onClear={() => set("collection", null)}
         />
       </Field>
     )}
-    <Field label="Button label"><Input value={String(p.cta || "")} onChange={e => set("cta", e.target.value)} placeholder={mode === "collection" ? "Shop collection" : "Shop selected"} /></Field>
+    <Field label={t("Button label")}><Input value={String(p.cta || "")} onChange={e => set("cta", e.target.value)} placeholder={mode === "collection" ? t("Shop collection") : t("Shop selected")} /></Field>
   </>);
 }
+/** Plan features the editor needs deep in the block field components. */
+const EditorPlanContext = React.createContext({ leadRewards: false, campaignPixels: false, customerSync: false });
+
 function CaptureFields({ p, set }: { p: Record<string, unknown>; set: (k: string, v: unknown) => void }) {
+  const plan = React.useContext(EditorPlanContext);
+  const consentEnabled = p.consentEnabled !== false;
+  const rewardPercent = Number(p.rewardPercent) || 10;
   return (<>
-    <Field label="Title"><Input value={String(p.title)} onChange={e => set("title", e.target.value)} /></Field>
-    <Field label="Subtitle"><Input value={String(p.subtitle || "")} onChange={e => set("subtitle", e.target.value)} /></Field>
-    <Field label="Placeholder"><Input value={String(p.placeholder || "")} onChange={e => set("placeholder", e.target.value)} placeholder="you@email.com" /></Field>
-    <Field label="Button label"><Input value={String(p.cta || "")} onChange={e => set("cta", e.target.value)} placeholder="Notify me" /></Field>
-    <Field label="Merchant email" hint="Receives submissions by SMTP. This address is never shown on the campaign page.">
+    <Field label={t("Title")}><Input value={String(p.title)} onChange={e => set("title", e.target.value)} /></Field>
+    <Field label={t("Subtitle")}><Input value={String(p.subtitle || "")} onChange={e => set("subtitle", e.target.value)} /></Field>
+    <Field label={t("Placeholder")}><Input value={String(p.placeholder || "")} onChange={e => set("placeholder", e.target.value)} placeholder="you@email.com" /></Field>
+    <Field label={t("Button label")}><Input value={String(p.cta || "")} onChange={e => set("cta", e.target.value)} placeholder={t("Notify me")} /></Field>
+    <Field label={t("Success message")}><Input value={String(p.successMessage || "")} onChange={e => set("successMessage", e.target.value)} placeholder={t("Thanks, you're on the list.")} /></Field>
+    <Field label={t("Notification email")} hint={t("Receives each sign-up by email. Leave empty to use the default of Settings. Never shown on the page.")}>
       <Input type="email" icon="mail" value={String(p.merchantEmail || p.notifyEmail || "")} onChange={e => set("merchantEmail", e.target.value)} placeholder="merchant@example.com" />
     </Field>
-    <Field label="Email subject">
-      <Input value={String(p.mailSubject || "")} onChange={e => set("mailSubject", e.target.value)} placeholder="New campaign lead" />
+    <Field label={t("Email subject")}>
+      <Input value={String(p.mailSubject || "")} onChange={e => set("mailSubject", e.target.value)} placeholder={t("New campaign lead")} />
     </Field>
+
+    <div className="prop-subhead">{t("Privacy & consent")}</div>
+    <div className="prop-row prop-row-h">
+      <span className="prop-label">{t("Marketing consent checkbox")}</span>
+      <EditorToggle on={consentEnabled} onChange={v => set("consentEnabled", v)} />
+    </div>
+    {consentEnabled && (<>
+      <div className="prop-row prop-row-h">
+        <span className="prop-label">{t("Required to sign up")}</span>
+        <EditorToggle on={p.consentRequired === true} onChange={v => set("consentRequired", v)} />
+      </div>
+      <Field label={t("Consent text")} hint={t("Never pre-ticked. Visitors who tick it are saved with marketing consent.")}>
+        <Textarea value={String(p.consentText || "")} onChange={e => set("consentText", e.target.value)} rows={2} placeholder={t("I agree to receive emails from the store. I can unsubscribe at any time.")} />
+      </Field>
+    </>)}
+    <Field label={t("Privacy policy URL")} hint={t("Linked next to the form — required in the EU (GDPR).")}>
+      <Input icon="link" value={String(p.privacyUrl || "")} onChange={e => set("privacyUrl", e.target.value)} placeholder="https://your-store.com/policies/privacy-policy" />
+    </Field>
+
+    <div className="prop-subhead">{t("Reward")}</div>
+    {plan.leadRewards ? (<>
+      <div className="prop-row prop-row-h">
+        <span className="prop-label">{t("Unique discount code for each sign-up")}</span>
+        <EditorToggle on={p.rewardEnabled === true} onChange={v => set("rewardEnabled", v)} />
+      </div>
+      {p.rewardEnabled === true && (<>
+        <Field label={t("Discount · {rewardPercent}% off", { rewardPercent })} hint={t("Single-use code created in Shopify Discounts and shown right after sign-up.")}>
+          <RangeSlider min={5} max={50} step={5} value={rewardPercent} onChange={v => set("rewardPercent", v)} aria-label={t("Reward discount")} />
+        </Field>
+        <Field label={t("Code prefix")}><Input value={String(p.rewardPrefix || "")} onChange={e => set("rewardPrefix", e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 10))} placeholder="WELCOME" /></Field>
+      </>)}
+    </>) : (
+      <FeatureLock compact title={t("Unique discount codes")} desc={t("Reward every sign-up with a single-use code — no sharing, no leaks.")} plan="Growth" />
+    )}
   </>);
 }
 function PromoFields({ p, set }: { p: Record<string, unknown>; set: (k: string, v: unknown) => void }) {
   return (<>
-    <Field label="Eyebrow"><Input value={String(p.eyebrow || "")} onChange={e => set("eyebrow", e.target.value)} placeholder="Use code" /></Field>
-    <Field label="Discount code"><Input value={String(p.code)} onChange={e => set("code", e.target.value)} style={{ fontFamily: "var(--ff-mono)", letterSpacing: "0.04em" }} /></Field>
-    <Field label="Description"><Input value={String(p.title)} onChange={e => set("title", e.target.value)} /></Field>
-    <Field label="Auto-apply at checkout">
+    <Field label={t("Eyebrow")}><Input value={String(p.eyebrow || "")} onChange={e => set("eyebrow", e.target.value)} placeholder={t("Use code")} /></Field>
+    <Field label={t("Discount code")}><Input value={String(p.code)} onChange={e => set("code", e.target.value)} style={{ fontFamily: "var(--ff-mono)", letterSpacing: "0.04em" }} /></Field>
+    <Field label={t("Description")}><Input value={String(p.title)} onChange={e => set("title", e.target.value)} /></Field>
+    <Field label={t("Auto-apply at checkout")}>
       <Select value={p.autoApply ? "on" : "off"} onChange={e => set("autoApply", e.target.value === "on")}>
-        <option value="on">Yes — apply automatically</option>
-        <option value="off">No — visitor must enter manually</option>
+        <option value="on">{t("Yes — apply automatically")}</option>
+        <option value="off">{t("No — visitor must enter manually")}</option>
       </Select>
     </Field>
-    <Field label="Button label"><Input value={String(p.cta || "")} onChange={e => set("cta", e.target.value)} placeholder="Apply discount" /></Field>
-    <Field label="Override URL" hint="Optional. Leave empty to use the shop discount URL when auto-apply is on."><Input value={String(p.href || "")} onChange={e => set("href", e.target.value)} placeholder="https://" icon="link" /></Field>
+    <Field label={t("Button label")}><Input value={String(p.cta || "")} onChange={e => set("cta", e.target.value)} placeholder={t("Apply discount")} /></Field>
+    <Field label={t("Override URL")} hint={t("Optional. Leave empty to use the shop discount URL when auto-apply is on.")}><Input value={String(p.href || "")} onChange={e => set("href", e.target.value)} placeholder="https://" icon="link" /></Field>
   </>);
 }
 function TextFields({ p, set }: { p: Record<string, unknown>; set: (k: string, v: unknown) => void }) {
   return (<>
-    <Field label="Heading"><Input value={String(p.heading || "")} onChange={e => set("heading", e.target.value)} /></Field>
-    <Field label="Body" hint="Plain text — line breaks preserved."><Textarea value={String(p.body || "")} onChange={e => set("body", e.target.value)} rows={4} /></Field>
+    <Field label={t("Heading")}><Input value={String(p.heading || "")} onChange={e => set("heading", e.target.value)} /></Field>
+    <Field label={t("Body")} hint={t("Plain text — line breaks preserved.")}><Textarea value={String(p.body || "")} onChange={e => set("body", e.target.value)} rows={4} /></Field>
   </>);
 }
 function ButtonFields({ p, set }: { p: Record<string, unknown>; set: (k: string, v: unknown) => void }) {
   return (<>
-    <Field label="Label"><Input value={String(p.label)} onChange={e => set("label", e.target.value)} /></Field>
+    <Field label={t("Label")}><Input value={String(p.label)} onChange={e => set("label", e.target.value)} /></Field>
     <Field label="URL"><Input value={String(p.href || "")} onChange={e => set("href", e.target.value)} placeholder="https://" icon="link" /></Field>
-    <Field label="Style">
+    <Field label={t("Style")}>
       <Select value={String(p.variant || "primary")} onChange={e => set("variant", e.target.value)}>
-        <option value="primary">Primary (filled)</option>
-        <option value="secondary">Secondary (outline)</option>
-        <option value="outline">Outline (light)</option>
-        <option value="ghost">Ghost (text only)</option>
+        <option value="primary">{t("Primary (filled)")}</option>
+        <option value="secondary">{t("Secondary (outline)")}</option>
+        <option value="outline">{t("Outline (light)")}</option>
+        <option value="ghost">{t("Ghost (text only)")}</option>
       </Select>
     </Field>
     <div className="prop-row prop-row-h">
-      <span className="prop-label">Show arrow icon</span>
+      <span className="prop-label">{t("Show arrow icon")}</span>
       <EditorToggle on={!!p.icon} onChange={v => set("icon", v)} />
     </div>
   </>);
 }
 function ImageFields({ p, set, setMany, actions }: { p: Record<string, unknown>; set: BlockPropSetter; setMany: BlockPropsSetter; actions: BlockEditorActions }) {
   return (<>
-    <Field label="Image" hint="Uploads to Cloudinary and uses the hosted asset in the campaign.">
+    <Field label={t("Image")} hint={t("Uploads to Cloudinary and uses the hosted asset in the campaign.")}>
       <ImageUploadControl
         value={String(p.src || "")}
         onUploaded={asset => {
@@ -954,45 +1005,48 @@ function ImageFields({ p, set, setMany, actions }: { p: Record<string, unknown>;
         actions={actions}
       />
     </Field>
-    <Field label="Aspect ratio">
-      <Segmented value={String(p.aspect || "16:9")} onChange={v => set("aspect", v)} options={[{ value: "16:9", label: "16:9" }, { value: "1:1", label: "1:1" }, { value: "4:5", label: "4:5" }, { value: "3:1", label: "Wide" }]} />
+    <Field label={t("Aspect ratio")}>
+      <Segmented value={String(p.aspect || "16:9")} onChange={v => set("aspect", v)} options={[{ value: "16:9", label: "16:9" }, { value: "1:1", label: "1:1" }, { value: "4:5", label: "4:5" }, { value: "3:1", label: t("Wide") }]} />
     </Field>
-    <Field label="Image fit">
+    <Field label={t("Image fit")}>
       <Select value={String(p.fit || "cover")} onChange={e => set("fit", e.target.value)}>
-        <option value="cover">Cover frame</option>
-        <option value="contain">Contain full image</option>
+        <option value="cover">{t("Cover frame")}</option>
+        <option value="contain">{t("Contain full image")}</option>
       </Select>
     </Field>
-    <Field label="Caption (optional)"><Input value={String(p.caption || "")} onChange={e => set("caption", e.target.value)} /></Field>
-    <Field label="Alt text" hint="Important for accessibility & SEO."><Input value={String(p.alt || "")} onChange={e => set("alt", e.target.value)} /></Field>
+    <Field label={t("Caption (optional)")}><Input value={String(p.caption || "")} onChange={e => set("caption", e.target.value)} /></Field>
+    <Field label={t("Alt text")} hint={t("Important for accessibility & SEO.")}><Input value={String(p.alt || "")} onChange={e => set("alt", e.target.value)} /></Field>
   </>);
 }
 function VideoFields({ p, set }: { p: Record<string, unknown>; set: (k: string, v: unknown) => void }) {
   return (<>
-    <Field label="Title (optional)"><Input value={String(p.title || "")} onChange={e => set("title", e.target.value)} placeholder="Watch the drop" /></Field>
-    <Field label="Video URL" hint="YouTube, Vimeo, or direct mp4."><Input value={String(p.src || "")} onChange={e => set("src", e.target.value)} placeholder="https://youtube.com/..." icon="link" /></Field>
-    <div className="prop-row prop-row-h"><span className="prop-label">Autoplay (muted)</span><EditorToggle on={!!p.autoplay} onChange={v => set("autoplay", v)} /></div>
-    <div className="prop-row prop-row-h"><span className="prop-label">Show controls</span><EditorToggle on={p.controls !== false} onChange={v => set("controls", v)} /></div>
+    <Field label={t("Title (optional)")}><Input value={String(p.title || "")} onChange={e => set("title", e.target.value)} placeholder={t("Watch the drop")} /></Field>
+    <Field label={t("Video URL")} hint={t("YouTube, Vimeo, or direct mp4.")}><Input value={String(p.src || "")} onChange={e => set("src", e.target.value)} placeholder="https://youtube.com/..." icon="link" /></Field>
+    <div className="prop-row prop-row-h"><span className="prop-label">{t("Autoplay (muted)")}</span><EditorToggle on={!!p.autoplay} onChange={v => set("autoplay", v)} /></div>
+    <div className="prop-row prop-row-h"><span className="prop-label">{t("Show controls")}</span><EditorToggle on={p.controls !== false} onChange={v => set("controls", v)} /></div>
   </>);
 }
 function ReviewsFields({ p, set }: { p: Record<string, unknown>; set: (k: string, v: unknown) => void }) {
   type ReviewItem = { name: string; rating: number; text: string; verified: boolean };
   const items = (p.items as ReviewItem[]) || [];
   return (<>
-    <Field label="Section title"><Input value={String(p.title || "")} onChange={e => set("title", e.target.value)} /></Field>
-    <Field label="Reviews">
-      <Repeater items={items} onChange={v => set("items", v)} addLabel="Add review"
-        defaultItem={{ name: "Anna L.", rating: 5, text: "Loved it. Fits perfectly.", verified: true }}
+    <Field label={t("Section title")}><Input value={String(p.title || "")} onChange={e => set("title", e.target.value)} /></Field>
+    <div className="text-xs muted" style={{ lineHeight: 1.45 }}>
+      {t("Publish genuine customer reviews only, and mark a review as verified only when it comes from a real buyer — fake reviews are illegal in the US (FTC) and the EU.")}
+    </div>
+    <Field label={t("Reviews")}>
+      <Repeater items={items} onChange={v => set("items", v)} addLabel={t("Add review")}
+        defaultItem={{ name: "", rating: 5, text: "", verified: false }}
         render={(it, setKey) => (<>
-          <div className="prop-row"><span className="prop-label">Name</span><Input value={it.name} onChange={e => setKey("name", e.target.value)} /></div>
-          <div className="prop-row"><span className="prop-label">Rating</span>
+          <div className="prop-row"><span className="prop-label">{t("Name")}</span><Input value={it.name} onChange={e => setKey("name", e.target.value)} /></div>
+          <div className="prop-row"><span className="prop-label">{t("Rating")}</span>
             <Select value={String(it.rating)} onChange={e => setKey("rating", +e.target.value)}>
               <option value="5">★★★★★</option><option value="4">★★★★☆</option>
               <option value="3">★★★☆☆</option><option value="2">★★☆☆☆</option><option value="1">★☆☆☆☆</option>
             </Select>
           </div>
-          <div className="prop-row"><span className="prop-label">Quote</span><Textarea value={it.text} onChange={e => setKey("text", e.target.value)} rows={2} /></div>
-          <div className="prop-row prop-row-h"><span className="prop-label">Verified buyer</span><EditorToggle on={!!it.verified} onChange={v => setKey("verified", v)} /></div>
+          <div className="prop-row"><span className="prop-label">{t("Quote")}</span><Textarea value={it.text} onChange={e => setKey("text", e.target.value)} rows={2} /></div>
+          <div className="prop-row prop-row-h"><span className="prop-label">{t("Verified buyer")}</span><EditorToggle on={!!it.verified} onChange={v => setKey("verified", v)} /></div>
         </>)}
       />
     </Field>
@@ -1002,14 +1056,14 @@ function FaqFields({ p, set }: { p: Record<string, unknown>; set: (k: string, v:
   type FaqItem = { q: string; a: string };
   const items = (p.items as FaqItem[]) || [];
   return (<>
-    <Field label="Section title"><Input value={String(p.title || "")} onChange={e => set("title", e.target.value)} /></Field>
-    <div className="prop-row prop-row-h"><span className="prop-label">Expand all by default</span><EditorToggle on={!!p.expanded} onChange={v => set("expanded", v)} /></div>
-    <Field label="Questions">
-      <Repeater items={items} onChange={v => set("items", v)} addLabel="Add question"
-        defaultItem={{ q: "New question?", a: "Helpful answer here." }}
+    <Field label={t("Section title")}><Input value={String(p.title || "")} onChange={e => set("title", e.target.value)} /></Field>
+    <div className="prop-row prop-row-h"><span className="prop-label">{t("Expand all by default")}</span><EditorToggle on={!!p.expanded} onChange={v => set("expanded", v)} /></div>
+    <Field label={t("Questions")}>
+      <Repeater items={items} onChange={v => set("items", v)} addLabel={t("Add question")}
+        defaultItem={{ q: t("New question?"), a: t("Helpful answer here.") }}
         render={(it, setKey) => (<>
-          <div className="prop-row"><span className="prop-label">Question</span><Input value={it.q} onChange={e => setKey("q", e.target.value)} /></div>
-          <div className="prop-row"><span className="prop-label">Answer</span><Textarea value={it.a} onChange={e => setKey("a", e.target.value)} rows={2} /></div>
+          <div className="prop-row"><span className="prop-label">{t("Question")}</span><Input value={it.q} onChange={e => setKey("q", e.target.value)} /></div>
+          <div className="prop-row"><span className="prop-label">{t("Answer")}</span><Textarea value={it.a} onChange={e => setKey("a", e.target.value)} rows={2} /></div>
         </>)}
       />
     </Field>
@@ -1017,18 +1071,18 @@ function FaqFields({ p, set }: { p: Record<string, unknown>; set: (k: string, v:
 }
 function UrgencyFields({ p, set }: { p: Record<string, unknown>; set: (k: string, v: unknown) => void }) {
   return (<>
-    <Field label="Prefix"><Input value={String(p.label || "")} onChange={e => set("label", e.target.value)} placeholder="Hurry" /></Field>
-    <Field label="Message"><Input value={String(p.message || "")} onChange={e => set("message", e.target.value)} /></Field>
-    <Field label="Tone">
+    <Field label={t("Prefix")}><Input value={String(p.label || "")} onChange={e => set("label", e.target.value)} placeholder={t("Hurry")} /></Field>
+    <Field label={t("Message")}><Input value={String(p.message || "")} onChange={e => set("message", e.target.value)} /></Field>
+    <Field label={t("Tone")}>
       <Select value={String(p.tone || "danger")} onChange={e => set("tone", e.target.value)}>
-        <option value="danger">Red · Danger</option><option value="warning">Amber · Warning</option>
-        <option value="info">Blue · Info</option><option value="dark">Dark · Neutral</option>
+        <option value="danger">{t("Red · Danger")}</option><option value="warning">{t("Amber · Warning")}</option>
+        <option value="info">{t("Blue · Info")}</option><option value="dark">{t("Dark · Neutral")}</option>
       </Select>
     </Field>
-    <Field label="Icon">
+    <Field label={t("Icon")}>
       <Select value={String(p.icon || "alert-triangle")} onChange={e => set("icon", e.target.value)}>
-        <option value="alert-triangle">Warning triangle</option><option value="clock">Clock</option>
-        <option value="zap">Lightning</option><option value="bell">Bell</option><option value="info">Info</option>
+        <option value="alert-triangle">{t("Warning triangle")}</option><option value="clock">{t("Clock")}</option>
+        <option value="zap">{t("Lightning")}</option><option value="bell">{t("Bell")}</option><option value="info">{t("Info")}</option>
       </Select>
     </Field>
   </>);
@@ -1036,26 +1090,26 @@ function UrgencyFields({ p, set }: { p: Record<string, unknown>; set: (k: string
 function QrFields({ p, set, qrChoices }: { p: Record<string, unknown>; set: (k: string, v: unknown) => void; qrChoices: MerchantQrChoice[] }) {
   const selected = qrChoices.find(q => q.id === p.qrId);
   return (<>
-    <Field label="Title"><Input value={String(p.title || "")} onChange={e => set("title", e.target.value)} /></Field>
-    <Field label="Subtitle"><Input value={String(p.subtitle || "")} onChange={e => set("subtitle", e.target.value)} /></Field>
-    <Field label="QR code" hint="Select one of the merchant QR codes. The campaign's primary QR is excluded.">
+    <Field label={t("Title")}><Input value={String(p.title || "")} onChange={e => set("title", e.target.value)} /></Field>
+    <Field label={t("Subtitle")}><Input value={String(p.subtitle || "")} onChange={e => set("subtitle", e.target.value)} /></Field>
+    <Field label={t("QR code")} hint={t("Select one of the merchant QR codes. The campaign's primary QR is excluded.")}>
       {qrChoices.length ? (
         <>
           <Select value={String(p.qrId || "")} onChange={e => set("qrId", e.target.value)}>
-            <option value="">Select a QR code</option>
+            <option value="">{t("Select a QR code")}</option>
             {qrChoices.map(q => <option key={q.id} value={q.id}>{q.name} · {q.type}</option>)}
           </Select>
-          {selected && <div className="field-hint">Scans through /s/{selected.slug}</div>}
+          {selected && <div className="field-hint">{t("Scans through {path}", { path: `/s/${selected.slug}` })}</div>}
         </>
       ) : (
         <div className="lp-empty-state">
           <Icon name="qr-code" size={18} />
-          <span>No available QR code. Create a QR code first, or unlink the campaign QR if you want to reuse it elsewhere.</span>
+          <span>{t("No available QR code. Create a QR code first, or unlink the campaign QR if you want to reuse it elsewhere.")}</span>
         </div>
       )}
     </Field>
-    <Field label="Size">
-      <Segmented value={String(p.size || "md")} onChange={v => set("size", v)} options={[{ value: "sm", label: "Small" }, { value: "md", label: "Medium" }, { value: "lg", label: "Large" }]} />
+    <Field label={t("Size")}>
+      <Segmented value={String(p.size || "md")} onChange={v => set("size", v)} options={[{ value: "sm", label: t("Small") }, { value: "md", label: t("Medium") }, { value: "lg", label: t("Large") }]} />
     </Field>
   </>);
 }
@@ -1075,13 +1129,13 @@ function ColorPicker({ value, onChange, allowEmpty = true }: { value?: string; o
             onClick={() => onChange(c)}
           />
         ))}
-        <label className={`swatch swatch-picker ${value && !COLOR_PRESETS.includes(value) ? "active" : ""}`} title="Custom color">
+        <label className={`swatch swatch-picker ${value && !COLOR_PRESETS.includes(value) ? "active" : ""}`} title={t("Custom color")}>
           <input type="color" value={current} onChange={e => onChange(e.target.value)} />
           <span className="picker-icon"><Icon name="edit" size={11} /></span>
         </label>
         {allowEmpty && (
           <button type="button" className="filter-clear" onClick={() => onChange(undefined)} style={{ marginLeft: 4 }}>
-            Default
+            {t("Default")}
           </button>
         )}
       </div>
@@ -1108,12 +1162,12 @@ function RichTypographyControl({ p, textRole, set }: {
   const alignValue = (p[alignKey] as "left" | "center" | "right" | undefined) || "center";
 
   return (
-    <div className="rte-bar" role="toolbar" aria-label={`${textRole} formatting`}>
+    <div className="rte-bar" role="toolbar" aria-label={t("{textRole} formatting", { textRole: t(textRole) })}>
       <select
         className="rte-select"
         value={fontValue}
         onChange={e => set(fontKey, e.target.value)}
-        title="Font"
+        title={t("Font")}
         style={{
           fontFamily: fontSpec.family,
           fontWeight: fontSpec.weight,
@@ -1147,7 +1201,7 @@ function RichTypographyControl({ p, textRole, set }: {
         className="rte-select"
         value={sizeValue}
         onChange={e => set(sizeKey, Number(e.target.value))}
-        title="Size"
+        title={t("Size")}
         style={{ minWidth: 64 }}
       >
         {[10, 12, 14, 16, 18, 20, 24, 28, 32].map(s => (
@@ -1158,38 +1212,38 @@ function RichTypographyControl({ p, textRole, set }: {
       <div className="rte-sep" />
 
       <div className="rte-group">
-        <button type="button" className={`rte-btn ${p[boldKey] ? "active" : ""}`} aria-pressed={!!p[boldKey]} title="Bold" onClick={() => set(boldKey, !p[boldKey])}>
+        <button type="button" className={`rte-btn ${p[boldKey] ? "active" : ""}`} aria-pressed={!!p[boldKey]} title={t("Bold")} onClick={() => set(boldKey, !p[boldKey])}>
           <Icon name="bold" size={14} />
         </button>
-        <button type="button" className={`rte-btn ${p[italicKey] ? "active" : ""}`} aria-pressed={!!p[italicKey]} title="Italic" onClick={() => set(italicKey, !p[italicKey])}>
+        <button type="button" className={`rte-btn ${p[italicKey] ? "active" : ""}`} aria-pressed={!!p[italicKey]} title={t("Italic")} onClick={() => set(italicKey, !p[italicKey])}>
           <Icon name="italic" size={14} />
         </button>
-        <button type="button" className={`rte-btn ${p[underlineKey] ? "active" : ""}`} aria-pressed={!!p[underlineKey]} title="Underline" onClick={() => set(underlineKey, !p[underlineKey])}>
+        <button type="button" className={`rte-btn ${p[underlineKey] ? "active" : ""}`} aria-pressed={!!p[underlineKey]} title={t("Underline")} onClick={() => set(underlineKey, !p[underlineKey])}>
           <Icon name="underline" size={14} />
         </button>
       </div>
 
       <div className="rte-sep" />
 
-      <div className="rte-group" role="radiogroup" aria-label="Text alignment">
+      <div className="rte-group" role="radiogroup" aria-label={t("Text alignment")}>
         <button type="button"
           className={`rte-btn ${alignValue === "left" ? "active" : ""}`}
           aria-pressed={alignValue === "left"}
-          title="Align left"
+          title={t("Align left")}
           onClick={() => set(alignKey, "left")}>
           <Icon name="align-left" size={14} />
         </button>
         <button type="button"
           className={`rte-btn ${alignValue === "center" ? "active" : ""}`}
           aria-pressed={alignValue === "center"}
-          title="Align center"
+          title={t("Align center")}
           onClick={() => set(alignKey, "center")}>
           <Icon name="align-center" size={14} />
         </button>
         <button type="button"
           className={`rte-btn ${alignValue === "right" ? "active" : ""}`}
           aria-pressed={alignValue === "right"}
-          title="Align right"
+          title={t("Align right")}
           onClick={() => set(alignKey, "right")}>
           <Icon name="align-right" size={14} />
         </button>
@@ -1208,8 +1262,8 @@ function ResourcePickButton({ icon, emptyLabel, items, onPick, onClear }: {
   return (
     <div className="resource-picker">
       <div className="resource-picker-actions">
-        <Button variant="secondary" icon="search" onClick={onPick}>{items.length ? "Change" : emptyLabel}</Button>
-        {!!items.length && <Button variant="ghost" icon="x" onClick={onClear}>Clear</Button>}
+        <Button variant="secondary" icon="search" onClick={onPick}>{items.length ? t("Change") : emptyLabel}</Button>
+        {!!items.length && <Button variant="ghost" icon="x" onClick={onClear}>{t("Clear")}</Button>}
       </div>
       {items.length ? (
         <div className="resource-list">
@@ -1221,7 +1275,7 @@ function ResourcePickButton({ icon, emptyLabel, items, onPick, onClear }: {
           ))}
         </div>
       ) : (
-        <div className="field-hint">Nothing selected yet.</div>
+        <div className="field-hint">{t("Nothing selected yet.")}</div>
       )}
     </div>
   );
@@ -1254,14 +1308,14 @@ function ImageUploadControl({ value, onUploaded, actions, onClear }: {
       ) : (
         <div className="image-upload-empty">
           <Icon name="image" size={18} />
-          <span>No image selected</span>
+          <span>{t("No image selected")}</span>
         </div>
       )}
       <div className="resource-picker-actions">
         <Button variant="secondary" icon="image" disabled={busy} onClick={() => fileRef.current?.click()}>
-          {busy ? "Uploading…" : value ? "Replace image" : "Upload image"}
+          {busy ? t("Uploading…") : value ? t("Replace image") : t("Upload image")}
         </Button>
-        {!!value && onClear && <Button variant="ghost" icon="x" disabled={busy} onClick={onClear}>Remove</Button>}
+        {!!value && onClear && <Button variant="ghost" icon="x" disabled={busy} onClick={onClear}>{t("Remove")}</Button>}
       </div>
       <input ref={fileRef} type="file" accept="image/png,image/jpeg,image/webp,image/gif,image/svg+xml" hidden onChange={e => upload(e.currentTarget.files?.[0])} />
     </div>
@@ -1276,44 +1330,44 @@ function BlockStyleFields({ block, set, setMany, actions }: { block: Block; set:
   const showCards = ["products", "reviews"].includes(block.type);
   return (
     <>
-      {showHeading && <Field label={block.type === "hero" ? "Title typography" : "Heading typography"}><RichTypographyControl p={p} textRole="heading" set={set} /></Field>}
-      {showBody && <Field label={block.type === "hero" ? "Subtitle typography" : "Body typography"}><RichTypographyControl p={p} textRole="body" set={set} /></Field>}
-      {["hero", "promo", "timer"].includes(block.type) && <Field label="Eyebrow / label typography"><RichTypographyControl p={p} textRole="eyebrow" set={set} /></Field>}
-      {showButton && <Field label="Button typography"><RichTypographyControl p={p} textRole="button" set={set} /></Field>}
-      {showHeading && <Field label={block.type === "hero" ? "Title color" : "Heading color"}><ColorPicker value={p.headingColor as string | undefined} onChange={v => set("headingColor", v)} /></Field>}
-      {showBody && <Field label={block.type === "hero" ? "Subtitle color" : "Body text color"}><ColorPicker value={p.bodyColor as string | undefined} onChange={v => set("bodyColor", v)} /></Field>}
-      {["hero", "promo", "timer"].includes(block.type) && <Field label="Eyebrow / label color"><ColorPicker value={p.eyebrowColor as string | undefined} onChange={v => set("eyebrowColor", v)} /></Field>}
+      {showHeading && <Field label={block.type === "hero" ? t("Title typography") : t("Heading typography")}><RichTypographyControl p={p} textRole="heading" set={set} /></Field>}
+      {showBody && <Field label={block.type === "hero" ? t("Subtitle typography") : t("Body typography")}><RichTypographyControl p={p} textRole="body" set={set} /></Field>}
+      {["hero", "promo", "timer"].includes(block.type) && <Field label={t("Eyebrow / label typography")}><RichTypographyControl p={p} textRole="eyebrow" set={set} /></Field>}
+      {showButton && <Field label={t("Button typography")}><RichTypographyControl p={p} textRole="button" set={set} /></Field>}
+      {showHeading && <Field label={block.type === "hero" ? t("Title color") : t("Heading color")}><ColorPicker value={p.headingColor as string | undefined} onChange={v => set("headingColor", v)} /></Field>}
+      {showBody && <Field label={block.type === "hero" ? t("Subtitle color") : t("Body text color")}><ColorPicker value={p.bodyColor as string | undefined} onChange={v => set("bodyColor", v)} /></Field>}
+      {["hero", "promo", "timer"].includes(block.type) && <Field label={t("Eyebrow / label color")}><ColorPicker value={p.eyebrowColor as string | undefined} onChange={v => set("eyebrowColor", v)} /></Field>}
       {showButton && (
         <>
-          <Field label="Button background"><ColorPicker value={p.buttonBgColor as string | undefined} onChange={v => set("buttonBgColor", v)} /></Field>
-          <Field label="Button text"><ColorPicker value={p.buttonTextColor as string | undefined} onChange={v => set("buttonTextColor", v)} /></Field>
-          <Field label="Button border"><ColorPicker value={p.buttonBorderColor as string | undefined} onChange={v => set("buttonBorderColor", v)} /></Field>
+          <Field label={t("Button background")}><ColorPicker value={p.buttonBgColor as string | undefined} onChange={v => set("buttonBgColor", v)} /></Field>
+          <Field label={t("Button text")}><ColorPicker value={p.buttonTextColor as string | undefined} onChange={v => set("buttonTextColor", v)} /></Field>
+          <Field label={t("Button border")}><ColorPicker value={p.buttonBorderColor as string | undefined} onChange={v => set("buttonBorderColor", v)} /></Field>
         </>
       )}
       {showCards && (
         <>
-          <Field label={block.type === "products" ? "Product card background" : "Review card background"}><ColorPicker value={p.cardBgColor as string | undefined} onChange={v => set("cardBgColor", v)} /></Field>
-          <Field label={block.type === "products" ? "Product title color" : "Review text color"}><ColorPicker value={p.cardTextColor as string | undefined} onChange={v => set("cardTextColor", v)} /></Field>
-          <Field label="Card border"><ColorPicker value={p.cardBorderColor as string | undefined} onChange={v => set("cardBorderColor", v)} /></Field>
+          <Field label={block.type === "products" ? t("Product card background") : t("Review card background")}><ColorPicker value={p.cardBgColor as string | undefined} onChange={v => set("cardBgColor", v)} /></Field>
+          <Field label={block.type === "products" ? t("Product title color") : t("Review text color")}><ColorPicker value={p.cardTextColor as string | undefined} onChange={v => set("cardTextColor", v)} /></Field>
+          <Field label={t("Card border")}><ColorPicker value={p.cardBorderColor as string | undefined} onChange={v => set("cardBorderColor", v)} /></Field>
         </>
       )}
-      {block.type === "products" && <Field label="Product price color"><ColorPicker value={p.priceColor as string | undefined} onChange={v => set("priceColor", v)} /></Field>}
+      {block.type === "products" && <Field label={t("Product price color")}><ColorPicker value={p.priceColor as string | undefined} onChange={v => set("priceColor", v)} /></Field>}
       {block.type === "capture" && (
         <>
-          <Field label="Capture panel background"><ColorPicker value={p.capturePanelBgColor as string | undefined} onChange={v => set("capturePanelBgColor", v)} /></Field>
-          <Field label="Input background"><ColorPicker value={p.inputBgColor as string | undefined} onChange={v => set("inputBgColor", v)} /></Field>
-          <Field label="Input text"><ColorPicker value={p.inputTextColor as string | undefined} onChange={v => set("inputTextColor", v)} /></Field>
-          <Field label="Placeholder"><ColorPicker value={p.placeholderColor as string | undefined} onChange={v => set("placeholderColor", v)} /></Field>
-          <Field label="Input border"><ColorPicker value={p.inputBorderColor as string | undefined} onChange={v => set("inputBorderColor", v)} /></Field>
+          <Field label={t("Capture panel background")}><ColorPicker value={p.capturePanelBgColor as string | undefined} onChange={v => set("capturePanelBgColor", v)} /></Field>
+          <Field label={t("Input background")}><ColorPicker value={p.inputBgColor as string | undefined} onChange={v => set("inputBgColor", v)} /></Field>
+          <Field label={t("Input text")}><ColorPicker value={p.inputTextColor as string | undefined} onChange={v => set("inputTextColor", v)} /></Field>
+          <Field label={t("Placeholder")}><ColorPicker value={p.placeholderColor as string | undefined} onChange={v => set("placeholderColor", v)} /></Field>
+          <Field label={t("Input border")}><ColorPicker value={p.inputBorderColor as string | undefined} onChange={v => set("inputBorderColor", v)} /></Field>
         </>
       )}
       {["timer", "promo", "reviews"].includes(block.type) && (
-        <Field label={block.type === "timer" ? "Number color" : block.type === "reviews" ? "Stars color" : "Code color"}>
+        <Field label={block.type === "timer" ? t("Number color") : block.type === "reviews" ? t("Stars color") : t("Code color")}>
           <ColorPicker value={p.accentColor as string | undefined} onChange={v => set("accentColor", v)} />
         </Field>
       )}
-      <Field label="Section background color"><ColorPicker value={p.bgColor as string | undefined} onChange={v => set("bgColor", v)} /></Field>
-      <Field label="Background image" hint="Optional Cloudinary-hosted background for this block.">
+      <Field label={t("Section background color")}><ColorPicker value={p.bgColor as string | undefined} onChange={v => set("bgColor", v)} /></Field>
+      <Field label={t("Background image")} hint={t("Optional Cloudinary-hosted background for this block.")}>
         <ImageUploadControl
           value={String(p.bgImageUrl || "")}
           onUploaded={asset => {
@@ -1327,18 +1381,18 @@ function BlockStyleFields({ block, set, setMany, actions }: { block: Block; set:
       </Field>
       {p.bgImageUrl && (
         <div className="grid grid-2">
-          <Field label="Image fit">
+          <Field label={t("Image fit")}>
             <Select value={String(p.bgImageFit || "cover")} onChange={e => set("bgImageFit", e.target.value)}>
-              <option value="cover">Cover</option>
-              <option value="contain">Contain</option>
+              <option value="cover">{t("Cover")}</option>
+              <option value="contain">{t("Contain")}</option>
             </Select>
           </Field>
-          <Field label="Overlay">
+          <Field label={t("Overlay")}>
             <Select value={String(p.bgOverlay ?? 0.25)} onChange={e => set("bgOverlay", Number(e.target.value))}>
-              <option value="0">None</option>
-              <option value="0.15">Light</option>
-              <option value="0.35">Medium</option>
-              <option value="0.55">Strong</option>
+              <option value="0">{t("None")}</option>
+              <option value="0.15">{t("Light")}</option>
+              <option value="0.35">{t("Medium")}</option>
+              <option value="0.55">{t("Strong")}</option>
             </Select>
           </Field>
         </div>
@@ -1367,11 +1421,12 @@ function BlockFields({ block, set, setMany, actions, qrChoices }: { block: Block
   }
 }
 
-function PageSettingsPanel({ settings, update, actions, isFreePlan }: {
+function PageSettingsPanel({ settings, update, actions, isFreePlan, canPixels }: {
   settings: CampaignPageSettings;
   update: <K extends keyof CampaignPageSettings>(key: K, value: CampaignPageSettings[K]) => void;
   actions: BlockEditorActions;
   isFreePlan: boolean;
+  canPixels: boolean;
 }) {
   return (
     <>
@@ -1387,53 +1442,53 @@ function PageSettingsPanel({ settings, update, actions, isFreePlan }: {
             <Icon name="settings" size={15} />
           </div>
           <div style={{ flex: 1, minWidth: 0 }}>
-            <div className="strong text-sm">Page settings</div>
-            <div className="text-xs muted">Global layout, brand and footer for this campaign.</div>
+            <div className="strong text-sm">{t("Page settings")}</div>
+            <div className="text-xs muted">{t("Global layout, brand and footer for this campaign.")}</div>
           </div>
         </div>
       </div>
 
       <div className="prop-section">
-        <div className="prop-section-label">Layout</div>
-        <Field label="Desktop width">
+        <div className="prop-section-label">{t("Layout")}</div>
+        <Field label={t("Desktop width")}>
           <Segmented
             value={settings.layout}
             onChange={v => update("layout", v as CampaignPageSettings["layout"])}
             options={[
-              { value: "contained", label: "Contained" },
-              { value: "wide", label: "Wide" },
-              { value: "full", label: "Full" },
+              { value: "contained", label: t("Contained") },
+              { value: "wide", label: t("Wide") },
+              { value: "full", label: t("Full") },
             ]}
           />
         </Field>
-        <Field label="Theme">
+        <Field label={t("Theme")}>
           <Segmented
             value={settings.theme}
             onChange={v => update("theme", v as CampaignPageSettings["theme"])}
             options={[
-              { value: "dark", label: "Dark" },
-              { value: "light", label: "Light" },
+              { value: "dark", label: t("Dark") },
+              { value: "light", label: t("Light") },
             ]}
           />
         </Field>
       </div>
 
       <div className="prop-section">
-        <div className="prop-section-label">Colors</div>
-        <Field label="Accent color">
+        <div className="prop-section-label">{t("Colors")}</div>
+        <Field label={t("Accent color")}>
           <ColorPicker value={settings.accentColor} onChange={v => update("accentColor", v || DEFAULT_CAMPAIGN_PAGE_SETTINGS.accentColor)} allowEmpty={false} />
         </Field>
-        <Field label="Page background">
+        <Field label={t("Page background")}>
           <ColorPicker value={settings.pageBgColor || undefined} onChange={v => update("pageBgColor", v || "")} />
         </Field>
-        <Field label="Default text color">
+        <Field label={t("Default text color")}>
           <ColorPicker value={settings.textColor || undefined} onChange={v => update("textColor", v || "")} />
         </Field>
       </div>
 
       <div className="prop-section">
-        <div className="prop-section-label">Campaign logo</div>
-        <Field label="Logo image">
+        <div className="prop-section-label">{t("Campaign logo")}</div>
+        <Field label={t("Logo image")}>
           <ImageUploadControl
             value={settings.logoImageUrl}
             onUploaded={asset => update("logoImageUrl", asset.url)}
@@ -1441,86 +1496,103 @@ function PageSettingsPanel({ settings, update, actions, isFreePlan }: {
             actions={actions}
           />
         </Field>
-        <Field label="Logo text" hint="Used beside the image, or alone when no image is uploaded.">
-          <Input value={settings.logoText} onChange={e => update("logoText", e.target.value)} placeholder="Aurora Studio" />
+        <Field label={t("Logo text")} hint={t("Used beside the image, or alone when no image is uploaded.")}>
+          <Input value={settings.logoText} onChange={e => update("logoText", e.target.value)} placeholder={t("Aurora Studio")} />
         </Field>
-        <Field label="Logo position">
+        <Field label={t("Logo position")}>
           <Segmented
             value={settings.logoPosition}
             onChange={v => update("logoPosition", v as CampaignPageSettings["logoPosition"])}
             options={[
-              { value: "left", label: "Left" },
-              { value: "center", label: "Center" },
-              { value: "right", label: "Right" },
+              { value: "left", label: t("Left") },
+              { value: "center", label: t("Center") },
+              { value: "right", label: t("Right") },
             ]}
           />
         </Field>
       </div>
 
+      <div className="prop-section">
+        <div className="prop-section-label">{t("Tracking pixels")}</div>
+        {canPixels ? (<>
+          <Field label={t("Google Analytics 4")} hint={t("Measurement ID — page views and a generate_lead event on each sign-up.")}>
+            <Input value={settings.ga4MeasurementId} onChange={e => update("ga4MeasurementId", e.target.value.trim().toUpperCase())} placeholder="G-XXXXXXXXXX" />
+          </Field>
+          <Field label={t("Meta Pixel")} hint={t("Pixel ID — PageView and a Lead event on each sign-up, ready for retargeting.")}>
+            <Input value={settings.metaPixelId} onChange={e => update("metaPixelId", e.target.value.replace(/\D/g, ""))} placeholder="123456789012345" />
+          </Field>
+          <div className="text-xs muted" style={{ lineHeight: 1.45 }}>
+            {t("Pixels load on the published page only (not in previews). You are responsible for visitor consent where the law requires it.")}
+          </div>
+        </>) : (
+          <FeatureLock compact title={t("GA4 & Meta Pixel")} desc={t("Measure campaign traffic and build retargeting audiences from every scan.")} plan="Growth" />
+        )}
+      </div>
+
       <div className="prop-section" style={{ borderBottom: 0 }}>
-        <div className="prop-section-label">Footer</div>
+        <div className="prop-section-label">{t("Footer")}</div>
         <div className="prop-row prop-row-h">
-          <span className="prop-label">Show campaign footer</span>
+          <span className="prop-label">{t("Show campaign footer")}</span>
           <EditorToggle on={settings.footerEnabled} onChange={v => update("footerEnabled", v)} />
         </div>
-        <Field label="Footer text">
-          <Input value={settings.footerText} onChange={e => update("footerText", e.target.value)} placeholder="Join the drop before it closes." />
+        <Field label={t("Footer text")}>
+          <Input value={settings.footerText} onChange={e => update("footerText", e.target.value)} placeholder={t("Join the drop before it closes.")} />
         </Field>
-        <Field label="Merchant credit">
-          <Input value={settings.creditText} onChange={e => update("creditText", e.target.value)} placeholder="© 2026 Aurora Studio" />
+        <Field label={t("Merchant credit")}>
+          <Input value={settings.creditText} onChange={e => update("creditText", e.target.value)} placeholder={t("© 2026 Aurora Studio")} />
         </Field>
         <div className="grid grid-2">
-          <Field label="Footer background">
+          <Field label={t("Footer background")}>
             <ColorPicker value={settings.footerBgColor || undefined} onChange={v => update("footerBgColor", v || "")} />
           </Field>
-          <Field label="Footer border">
+          <Field label={t("Footer border")}>
             <ColorPicker value={settings.footerBorderColor || undefined} onChange={v => update("footerBorderColor", v || "")} />
           </Field>
-          <Field label="Footer text color">
+          <Field label={t("Footer text color")}>
             <ColorPicker value={settings.footerTextColor || undefined} onChange={v => update("footerTextColor", v || "")} />
           </Field>
-          <Field label="Credit color">
+          <Field label={t("Credit color")}>
             <ColorPicker value={settings.footerCreditColor || undefined} onChange={v => update("footerCreditColor", v || "")} />
           </Field>
         </div>
-        <Field label="Social icon colors">
+        <Field label={t("Social icon colors")}>
           <Segmented
             value={settings.socialIconColorMode}
             onChange={v => update("socialIconColorMode", v as CampaignPageSettings["socialIconColorMode"])}
             options={[
-              { value: "custom", label: "Custom" },
-              { value: "brand", label: "Original" },
+              { value: "custom", label: t("Custom") },
+              { value: "brand", label: t("Original") },
             ]}
           />
         </Field>
         {settings.socialIconColorMode === "custom" && (
-          <Field label="Social icon color">
+          <Field label={t("Social icon color")}>
             <ColorPicker value={settings.socialIconColor || undefined} onChange={v => update("socialIconColor", v || "")} />
           </Field>
         )}
         <div className="grid grid-2">
-          <Field label="Instagram">
+          <Field label={t("Instagram")}>
             <Input value={settings.instagramUrl} onChange={e => update("instagramUrl", e.target.value)} placeholder="https://instagram.com/..." />
           </Field>
-          <Field label="TikTok">
+          <Field label={t("TikTok")}>
             <Input value={settings.tiktokUrl} onChange={e => update("tiktokUrl", e.target.value)} placeholder="https://tiktok.com/..." />
           </Field>
-          <Field label="Facebook">
+          <Field label={t("Facebook")}>
             <Input value={settings.facebookUrl} onChange={e => update("facebookUrl", e.target.value)} placeholder="https://facebook.com/..." />
           </Field>
-          <Field label="X / Twitter">
+          <Field label={t("X / Twitter")}>
             <Input value={settings.xUrl} onChange={e => update("xUrl", e.target.value)} placeholder="https://x.com/..." />
           </Field>
         </div>
-        <Field label="Website">
+        <Field label={t("Website")}>
           <Input value={settings.websiteUrl} onChange={e => update("websiteUrl", e.target.value)} placeholder="https://your-store.com" />
         </Field>
-        <Field label="Watermark text">
+        <Field label={t("Watermark text")}>
           <ColorPicker value={settings.poweredTextColor || undefined} onChange={v => update("poweredTextColor", v || "")} />
         </Field>
         <div className="prop-row prop-row-h">
-          <span className="prop-label">Powered by TrackQR watermark</span>
-          <Badge>{isFreePlan ? "Visible on the Free plan" : "Hidden on paid plans"}</Badge>
+          <span className="prop-label">{t("Powered by TrackQR watermark")}</span>
+          <Badge>{isFreePlan ? t("Visible on the Free plan") : t("Hidden on paid plans")}</Badge>
         </div>
       </div>
     </>
@@ -1554,8 +1626,8 @@ function BgSwatchPicker({ value, onChange }: { value: string; onChange: (v: stri
         <button type="button" key={o.value}
           className={`swatch ${value === o.value ? "active" : ""}`}
           style={{ background: o.swatch, boxShadow: value === o.value ? `0 0 0 2px var(--accent)` : `0 0 0 1px ${o.border}` }}
-          title={o.label}
-          aria-label={`Background ${o.label}`}
+          title={t(o.label)}
+          aria-label={t("Background {label}", { label: t(o.label) })}
           onClick={() => onChange(o.value)} />
       ))}
     </div>
@@ -1591,67 +1663,67 @@ function PropertiesPanel({ block, updateProp, updateProps, updateLayout, updateV
           <Icon name={meta?.icon || "type"} size={15} />
         </div>
         <div style={{ flex: 1, minWidth: 0 }}>
-          <div className="strong text-sm">{meta?.name}</div>
-          <div className="text-xs muted" style={{ fontFamily: "var(--ff-mono)" }}>id · {block.id}</div>
+          <div className="strong text-sm">{meta ? t(meta.name) : ""}</div>
+          <div className="text-xs muted" style={{ fontFamily: "var(--ff-mono)" }}>{t("id · {id}", { id: block.id })}</div>
         </div>
       </div>
     </div>
 
     {/* Content */}
-    <PropSection label="Content" k="content" collapsed={collapsed} setCollapsed={setCollapsed}>
+    <PropSection label={t("Content")} k="content" collapsed={collapsed} setCollapsed={setCollapsed}>
       <BlockFields block={block} set={updateProp} setMany={updateProps} actions={actions} qrChoices={qrChoices} />
     </PropSection>
 
     {/* Layout */}
-    <PropSection label="Layout" k="layout" collapsed={collapsed} setCollapsed={setCollapsed}>
-      <Field label="Alignment">
+    <PropSection label={t("Layout")} k="layout" collapsed={collapsed} setCollapsed={setCollapsed}>
+      <Field label={t("Alignment")}>
         <Segmented
           value={block.layout?.align || "left"}
           onChange={v => updateLayout("align", v)}
-          options={ALIGN_OPTS}
+          options={ALIGN_OPTS.map(o => ({ ...o, label: t(o.label).charAt(0) }))}
         />
       </Field>
-      <Field label="Spacing">
+      <Field label={t("Spacing")}>
         <Segmented
           value={block.layout?.padding || "md"}
           onChange={v => updateLayout("padding", v)}
-          options={PADDING_OPTS}
+          options={PADDING_OPTS.map(o => ({ ...o, label: t(o.label).charAt(0) }))}
         />
       </Field>
-      <Field label="Background preset">
+      <Field label={t("Background preset")}>
         <BgSwatchPicker value={block.layout?.bg || "surface"} onChange={v => updateLayout("bg", v)} />
       </Field>
     </PropSection>
 
     {/* Style */}
-    <PropSection label="Style" k="style" collapsed={collapsed} setCollapsed={setCollapsed}>
+    <PropSection label={t("Style")} k="style" collapsed={collapsed} setCollapsed={setCollapsed}>
       <BlockStyleFields block={block} set={updateProp} setMany={updateProps} actions={actions} />
     </PropSection>
 
     {/* Visibility */}
-    <PropSection label="Visibility" k="visibility" collapsed={collapsed} setCollapsed={setCollapsed} defaultOpen={false}>
+    <PropSection label={t("Visibility")} k="visibility" collapsed={collapsed} setCollapsed={setCollapsed} defaultOpen={false}>
       <div className="prop-row prop-row-h">
-        <span className="prop-label"><Icon name="monitor" size={12} style={{ marginRight: 6, color: "var(--fg-subtle)", verticalAlign: "-2px" }} />Show on desktop</span>
+        <span className="prop-label"><Icon name="monitor" size={12} style={{ marginRight: 6, color: "var(--fg-subtle)", verticalAlign: "-2px" }} />{t("Show on desktop")}</span>
         <EditorToggle on={block.visibility?.desktop !== false} onChange={v => updateVisibility("desktop", v)} />
       </div>
       <div className="prop-row prop-row-h">
-        <span className="prop-label"><Icon name="smartphone" size={12} style={{ marginRight: 6, color: "var(--fg-subtle)", verticalAlign: "-2px" }} />Show on mobile</span>
+        <span className="prop-label"><Icon name="smartphone" size={12} style={{ marginRight: 6, color: "var(--fg-subtle)", verticalAlign: "-2px" }} />{t("Show on mobile")}</span>
         <EditorToggle on={block.visibility?.mobile !== false} onChange={v => updateVisibility("mobile", v)} />
       </div>
-      <div className="field-hint" style={{ marginTop: 8 }}>Hidden blocks render as placeholders in the editor.</div>
+      <div className="field-hint" style={{ marginTop: 8 }}>{t("Hidden blocks render as placeholders in the editor.")}</div>
     </PropSection>
 
     {/* Actions */}
     <div className="prop-section" style={{ borderBottom: 0 }}>
       <div className="flex gap-2">
-        <Button size="sm" variant="secondary" icon="copy" onClick={onDuplicate} style={{ flex: 1 }}>Duplicate</Button>
+        <Button size="sm" variant="secondary" icon="copy" onClick={onDuplicate} style={{ flex: 1 }}>{t("Duplicate")}</Button>
         <Button size="sm" variant="ghost" icon="trash" onClick={onDelete}
           style={{ color: "var(--red-fg)", flex: 1, border: "1px solid var(--red-border)", background: "var(--red-soft)" }}>
-          Delete
+          {t("Delete")}
         </Button>
       </div>
       <div className="text-xs muted mt-4" style={{ textAlign: "center", fontFamily: "var(--ff-mono)" }}>
-        ⌘D duplicate · ⌫ delete · ⌘↑↓ move
+        {t("⌘D duplicate · ⌫ delete · ⌘↑↓ move")}
       </div>
     </div>
   </>);
@@ -1667,17 +1739,17 @@ function BlockToolbar({ block, canUp, canDown, onMoveUp, onMoveDown, onDuplicate
   const stop = (fn: () => void) => (e: React.MouseEvent) => { e.stopPropagation(); fn(); };
   return (
     <div className="block-toolbar">
-      <span className="block-toolbar-label"><Icon name={meta?.icon || "type"} size={10} />{meta?.name || block.type}</span>
-      <button className="block-toolbar-btn" disabled={!canUp} onClick={stop(onMoveUp)} title="Move up"><Icon name="arrow-up" size={11} /></button>
-      <button className="block-toolbar-btn" disabled={!canDown} onClick={stop(onMoveDown)} title="Move down"><Icon name="arrow-down" size={11} /></button>
-      <button className="block-toolbar-btn" onClick={stop(onDuplicate)} title="Duplicate"><Icon name="copy" size={11} /></button>
-      <button className="block-toolbar-btn danger" onClick={stop(onDelete)} title="Delete" style={{ marginRight: 4 }}><Icon name="trash" size={11} /></button>
+      <span className="block-toolbar-label"><Icon name={meta?.icon || "type"} size={10} />{meta ? t(meta.name) : block.type}</span>
+      <button className="block-toolbar-btn" disabled={!canUp} onClick={stop(onMoveUp)} title={t("Move up")}><Icon name="arrow-up" size={11} /></button>
+      <button className="block-toolbar-btn" disabled={!canDown} onClick={stop(onMoveDown)} title={t("Move down")}><Icon name="arrow-down" size={11} /></button>
+      <button className="block-toolbar-btn" onClick={stop(onDuplicate)} title={t("Duplicate")}><Icon name="copy" size={11} /></button>
+      <button className="block-toolbar-btn danger" onClick={stop(onDelete)} title={t("Delete")} style={{ marginRight: 4 }}><Icon name="trash" size={11} /></button>
     </div>
   );
 }
 
 /* ══════════════ EditorTopBar ══════════════ */
-function EditorTopBar({ campaignName, setCampaignName, device, setDevice, onNavigate, onUndo, onRedo, canUndo, canRedo, status, saveState, onSave, onPublish, onPause, campaignId }: {
+function EditorTopBar({ campaignName, setCampaignName, device, setDevice, onNavigate, onUndo, onRedo, canUndo, canRedo, status, saveState, onSave, onPublish, onPause, previewPath }: {
   campaignName: string; setCampaignName: (v: string) => void;
   device: DeviceType; setDevice: (v: DeviceType) => void;
   onNavigate: () => void;
@@ -1688,7 +1760,7 @@ function EditorTopBar({ campaignName, setCampaignName, device, setDevice, onNavi
   onSave: () => void;
   onPublish: () => void;
   onPause: () => void;
-  campaignId: string;
+  previewPath: string;
 }) {
   const statusTone: Record<CampaignStatus, "success" | "warning" | "neutral" | "danger"> = {
     ACTIVE: "success", PAUSED: "warning", DRAFT: "neutral", ENDED: "danger",
@@ -1698,15 +1770,15 @@ function EditorTopBar({ campaignName, setCampaignName, device, setDevice, onNavi
   };
 
   const indicator =
-    saveState === "saving" ? <span className="text-xs muted" style={{ fontFamily: "var(--ff-mono)" }}>Saving…</span> :
-    saveState === "saved"  ? <span className="text-xs muted" style={{ fontFamily: "var(--ff-mono)", color: "var(--green-fg)" }}>Saved ✓</span> :
-    saveState === "error"  ? <span className="text-xs muted" style={{ fontFamily: "var(--ff-mono)", color: "var(--red-fg)" }}>Save failed</span> :
+    saveState === "saving" ? <span className="text-xs muted" style={{ fontFamily: "var(--ff-mono)" }}>{t("Saving…")}</span> :
+    saveState === "saved"  ? <span className="text-xs muted" style={{ fontFamily: "var(--ff-mono)", color: "var(--green-fg)" }}>{t("Saved ✓")}</span> :
+    saveState === "error"  ? <span className="text-xs muted" style={{ fontFamily: "var(--ff-mono)", color: "var(--red-fg)" }}>{t("Save failed")}</span> :
     null;
 
   return (
     <div className="flex items-center justify-between mb-3">
       <div className="flex items-center gap-3">
-        <Button size="sm" variant="ghost" icon="chevron-left" onClick={onNavigate}>Campaigns</Button>
+        <Button size="sm" variant="ghost" icon="chevron-left" onClick={onNavigate}>{t("Campaigns")}</Button>
         <span className="muted">/</span>
         <input
           value={campaignName}
@@ -1715,12 +1787,12 @@ function EditorTopBar({ campaignName, setCampaignName, device, setDevice, onNavi
           onFocus={e => { (e.target as HTMLInputElement).style.background = "var(--bg-sunken)"; }}
           onBlur={e => { (e.target as HTMLInputElement).style.background = "transparent"; }}
         />
-        <Badge tone={statusTone[status]} dot>{statusLabel[status]}</Badge>
+        <Badge tone={statusTone[status]} dot>{t(statusLabel[status])}</Badge>
         {indicator}
       </div>
       <div className="flex gap-2 items-center">
-        <Button size="sm" variant="ghost" disabled={!canUndo} onClick={onUndo} title="Undo (⌘Z)"><Icon name="undo" size={13} /></Button>
-        <Button size="sm" variant="ghost" disabled={!canRedo} onClick={onRedo} title="Redo (⌘⇧Z)"><Icon name="redo" size={13} /></Button>
+        <Button size="sm" variant="ghost" disabled={!canUndo} onClick={onUndo} title={t("Undo (⌘Z)")}><Icon name="undo" size={13} /></Button>
+        <Button size="sm" variant="ghost" disabled={!canRedo} onClick={onRedo} title={t("Redo (⌘⇧Z)")}><Icon name="redo" size={13} /></Button>
         <div style={{ width: 1, height: 22, background: "var(--border)", margin: "0 4px" }} />
         <Segmented value={device} onChange={v => setDevice(v as DeviceType)}
           options={[{ value: "desktop", label: "", icon: "monitor" }, { value: "tablet", label: "", icon: "tablet" }, { value: "mobile", label: "", icon: "smartphone" }]} />
@@ -1729,15 +1801,15 @@ function EditorTopBar({ campaignName, setCampaignName, device, setDevice, onNavi
           size="sm"
           variant="secondary"
           icon="eye"
-          onClick={() => window.open(`${window.location.origin}/campaigns/${campaignId}/preview`, "_blank", "noopener,noreferrer")}
+          onClick={() => window.open(`${window.location.origin}${previewPath}`, "_blank", "noopener,noreferrer")}
         >
-          Preview
+          {t("Preview")}
         </Button>
-        <Button size="sm" variant="secondary" icon="save" onClick={onSave} disabled={saveState === "saving"}>Save</Button>
+        <Button size="sm" variant="secondary" icon="save" onClick={onSave} disabled={saveState === "saving"}>{t("Save")}</Button>
         {status === "ACTIVE" ? (
-          <Button size="sm" variant="secondary" icon="pause" onClick={onPause}>Pause</Button>
+          <Button size="sm" variant="secondary" icon="pause" onClick={onPause}>{t("Pause")}</Button>
         ) : (
-          <Button size="sm" variant="success" icon="rocket" onClick={onPublish}>Activate</Button>
+          <Button size="sm" variant="success" icon="rocket" onClick={onPublish}>{t("Activate")}</Button>
         )}
       </div>
     </div>
@@ -1750,7 +1822,8 @@ export default function CampaignEditor() {
   const navigate = useNavigate();
   const toast    = useToast();
   const requestReview = useReviewRequest();
-  const { campaign, qrChoices, isFreePlan } = useLoaderData<typeof loader>();
+  const { campaign, qrChoices, isFreePlan, planFeatures, previewPath } = useLoaderData<typeof loader>();
+  const canPixels = planFeatures.campaignPixels;
   const fetcher = useFetcher<typeof action>();
 
   const initialBlocks: Block[] = (campaign.blocks?.length ? campaign.blocks : STARTER_BLOCKS.map(makeBlock)) as Block[];
@@ -1819,8 +1892,8 @@ export default function CampaignEditor() {
       setSaveState("error");
       toast({
         type: "error",
-        title: fetcher.data.error === "quota" ? "Plan limit reached" : "Save failed",
-        desc: fetcher.data.message ?? "Try again.",
+        title: fetcher.data.error === "quota" ? t("Plan limit reached") : t("Save failed"),
+        desc: tm(fetcher.data.message) ?? t("Try again."),
       });
     }
   }, [fetcher.state, fetcher.data]);
@@ -1836,14 +1909,14 @@ export default function CampaignEditor() {
     lastSavedJson.current = JSON.stringify(blocks);
     lastSavedSettingsJson.current = JSON.stringify(pageSettings);
     lastSavedName.current = campaignName;
-    toast({ title: "Activating…", desc: "Your campaign page is going live." });
+    toast({ title: t("Activating…"), desc: t("Your campaign page is going live.") });
   }
 
   function pause() {
     const fd = new FormData();
     fd.set("intent", "pause");
     fetcher.submit(fd, { method: "post" });
-    toast({ type: "warning", title: "Paused" });
+    toast({ type: "warning", title: t("Paused") });
   }
 
   function manualSave() {
@@ -1857,7 +1930,7 @@ export default function CampaignEditor() {
     const featuredImage = item.featuredImage as Record<string, unknown> | undefined;
     return {
       id: String(item.id || ""),
-      title: String(item.title || "Untitled"),
+      title: String(item.title || t("Untitled")),
       handle: typeof item.handle === "string" ? item.handle : undefined,
       onlineStoreUrl: typeof item.onlineStoreUrl === "string" ? item.onlineStoreUrl : undefined,
       image:
@@ -1877,11 +1950,11 @@ export default function CampaignEditor() {
       const res = await fetch("/api/files/upload", { method: "post", body: fd });
       const json = await res.json() as { ok?: boolean; asset?: UploadedImageAsset; message?: string };
       if (!res.ok || !json.ok || !json.asset?.url) {
-        toast({ type: "error", title: "Upload failed", desc: json.message ?? "Try a smaller PNG, JPG, WebP, GIF or SVG." });
+        toast({ type: "error", title: t("Upload failed"), desc: tm(json.message) ?? t("Try a smaller PNG, JPG, WebP, GIF or SVG.") });
         return;
       }
       apply(json.asset);
-      toast({ title: "Image uploaded", desc: "Stored in Cloudinary." });
+      toast({ title: t("Image uploaded"), desc: t("Stored in Cloudinary.") });
     },
     async pickProducts(apply) {
       try {
@@ -1891,7 +1964,7 @@ export default function CampaignEditor() {
         if (items.length) apply(items);
       } catch (err) {
         console.error("product resourcePicker failed", err);
-        toast({ type: "error", title: "Picker unavailable", desc: "Open the app inside Shopify admin to select products." });
+        toast({ type: "error", title: t("Picker unavailable"), desc: t("Open the app inside Shopify admin to select products.") });
       }
     },
     async pickCollection(apply) {
@@ -1902,14 +1975,14 @@ export default function CampaignEditor() {
         if (item) apply(item);
       } catch (err) {
         console.error("collection resourcePicker failed", err);
-        toast({ type: "error", title: "Picker unavailable", desc: "Open the app inside Shopify admin to select collections." });
+        toast({ type: "error", title: t("Picker unavailable"), desc: t("Open the app inside Shopify admin to select collections.") });
       }
     },
   };
 
   const selected    = blocks.find(b => b.id === selectedId) ?? null;
   const pageSelected = selectedId === PAGE_SETTINGS_ID;
-  const effectivePageSettings = campaignPageSettingsForPlan(pageSettings, isFreePlan);
+  const effectivePageSettings = campaignPageSettingsForPlan(pageSettings, { forcePoweredBy: isFreePlan, pixels: canPixels });
   const pageCanvasStyle = {
     "--editor-page-accent": effectivePageSettings.accentColor,
     background: effectivePageSettings.pageBgColor || (effectivePageSettings.theme === "light" ? "#F8FAFC" : "#0B1220"),
@@ -1975,7 +2048,7 @@ export default function CampaignEditor() {
     next.splice(i + 1, 0, copy);
     commit(next);
     setSelectedId(copy.id);
-    toast?.({ title: "Block duplicated" });
+    toast?.({ title: t("Block duplicated") });
   };
   const deleteBlock = (id: string) => {
     const i = blocks.findIndex(b => b.id === id);
@@ -1991,7 +2064,7 @@ export default function CampaignEditor() {
     next.splice(atIdx ?? blocks.length, 0, newBlock);
     commit(next);
     setSelectedId(newBlock.id);
-    toast?.({ title: `${blockMeta(type)?.name || type} added` });
+    toast?.({ title: t("{block} added", { block: t(blockMeta(type)?.name ?? type) }) });
   };
 
   /* ── Drag handlers ── */
@@ -2030,7 +2103,7 @@ export default function CampaignEditor() {
   const filteredLibrary = useMemo(() => {
     if (!search.trim()) return BLOCK_LIBRARY;
     const q = search.toLowerCase();
-    return BLOCK_LIBRARY.filter(b => b.name.toLowerCase().includes(q));
+    return BLOCK_LIBRARY.filter(b => t(b.name).toLowerCase().includes(q) || b.name.toLowerCase().includes(q));
   }, [search]);
 
   /* ── Keyboard shortcuts ── */
@@ -2050,6 +2123,7 @@ export default function CampaignEditor() {
   }, [selected, selectedId, blocks, history]);
 
   return (
+    <EditorPlanContext.Provider value={planFeatures}>
     <div className="campaign-editor-page">
       <EditorTopBar
         campaignName={campaignName}
@@ -2066,7 +2140,7 @@ export default function CampaignEditor() {
         onSave={manualSave}
         onPublish={publish}
         onPause={pause}
-        campaignId={campaign.id}
+        previewPath={previewPath}
       />
 
       <div className="editor-shell">
@@ -2074,11 +2148,11 @@ export default function CampaignEditor() {
         {/* ══ LEFT — Block library ══ */}
         <div className="editor-col">
           <div className="editor-col-head">
-            <span>Blocks · Drag onto canvas</span>
+            <span>{t("Blocks · Drag onto canvas")}</span>
           </div>
           <div style={{ padding: "10px 12px 0" }}>
             <div className="block-search">
-              <Input icon="search" placeholder="Search blocks…" value={search} onChange={e => setSearch(e.target.value)} />
+              <Input icon="search" placeholder={t("Search blocks…")} value={search} onChange={e => setSearch(e.target.value)} />
             </div>
           </div>
           <div className="editor-blocks scroll">
@@ -2086,15 +2160,15 @@ export default function CampaignEditor() {
               type="button"
               className={`block-item ${pageSelected ? "selected" : ""}`}
               onClick={() => setSelectedId(PAGE_SETTINGS_ID)}
-              title="Edit page settings"
+              title={t("Edit page settings")}
             >
               <div className="block-item-icon"><Icon name="settings" /></div>
-              <span style={{ flex: 1 }}>Page settings</span>
+              <span style={{ flex: 1 }}>{t("Page settings")}</span>
               <span className="tone-pill blue" />
             </button>
             <div className="block-library-divider" />
             {filteredLibrary.length === 0 ? (
-              <div className="block-palette-empty">No blocks match &quot;{search}&quot;</div>
+              <div className="block-palette-empty">{t("No blocks match “{search}”", { search })}</div>
             ) : filteredLibrary.map(b => (
               <button key={b.id}
                 type="button"
@@ -2102,15 +2176,15 @@ export default function CampaignEditor() {
                 draggable
                 onDragStart={e => onLibraryDragStart(e, b.id)}
                 onClick={() => addBlock(b.id)}
-                title={`Click or drag to add ${b.name}`}>
+                title={t("Click or drag to add {name}", { name: b.name })}>
                 <div className="block-item-icon"><Icon name={b.icon} /></div>
-                <span style={{ flex: 1 }}>{b.name}</span>
+                <span style={{ flex: 1 }}>{t(b.name)}</span>
                 <span className={`tone-pill ${b.tone || "neutral"}`} />
               </button>
             ))}
           </div>
           <div style={{ padding: "10px 12px", borderTop: "1px solid var(--border-soft)", fontSize: 10.5, color: "var(--fg-subtle)", fontFamily: "var(--ff-mono)", textTransform: "uppercase", letterSpacing: ".06em" }}>
-            {blocks.length} block{blocks.length !== 1 ? "s" : ""} on page
+            {tp(blocks.length, "{count} block on page", "{count} blocks on page")}
           </div>
         </div>
 
@@ -2121,8 +2195,8 @@ export default function CampaignEditor() {
             {blocks.length === 0 && (
               <div className="canvas-empty">
                 <Icon name="layers" size={28} />
-                <div className="mt-2 strong">Empty canvas</div>
-                <div className="text-sm mt-2">Drag blocks from the left to start composing your landing page.</div>
+                <div className="mt-2 strong">{t("Empty canvas")}</div>
+                <div className="text-sm mt-2">{t("Drag blocks from the left to start composing your landing page.")}</div>
               </div>
             )}
 
@@ -2164,7 +2238,7 @@ export default function CampaignEditor() {
                   >
                     {hiddenOnThisDevice && (
                       <div className="hidden-badge">
-                        <Icon name="eye-off" size={10} /> Hidden
+                        <Icon name="eye-off" size={10} /> {t("Hidden")}
                       </div>
                     )}
                     {isSelected && (
@@ -2200,7 +2274,7 @@ export default function CampaignEditor() {
               onDragLeave={() => setDropEndZone(false)}
             >
               <Icon name="plus" size={14} />
-              {dropEndZone ? "Drop to add here" : "Drag a block here, or click one on the left"}
+              {dropEndZone ? t("Drop to add here") : t("Drag a block here, or click one on the left")}
             </div>
           </div>
         </div>
@@ -2208,16 +2282,16 @@ export default function CampaignEditor() {
         {/* ══ RIGHT — Properties ══ */}
         <div className="editor-col">
           <div className="editor-col-head">
-            {pageSelected ? <span>Page · Settings</span> : selected ? <span>{blockMeta(selected.type)?.name || selected.type} · Properties</span> : <span>Properties</span>}
+            {pageSelected ? <span>{t("Page · Settings")}</span> : selected ? <span>{t("{block} · Properties", { block: t(blockMeta(selected.type)?.name ?? selected.type) })}</span> : <span>{t("Properties")}</span>}
           </div>
           <div className="scroll" style={{ overflow: "auto", flex: 1 }}>
             {pageSelected ? (
-              <PageSettingsPanel settings={pageSettings} update={updatePageSetting} actions={actions} isFreePlan={isFreePlan} />
+              <PageSettingsPanel settings={pageSettings} update={updatePageSetting} actions={actions} isFreePlan={isFreePlan} canPixels={canPixels} />
             ) : !selected ? (
               <div className="empty">
                 <div className="empty-icon"><Icon name="panel-left" /></div>
-                <div className="empty-title">Nothing selected</div>
-                <div className="empty-desc">Click a block in the canvas to edit its content, style, and visibility.</div>
+                <div className="empty-title">{t("Nothing selected")}</div>
+                <div className="empty-desc">{t("Click a block in the canvas to edit its content, style, and visibility.")}</div>
               </div>
             ) : (
               <PropertiesPanel
@@ -2238,6 +2312,7 @@ export default function CampaignEditor() {
         </div>
       </div>
     </div>
+    </EditorPlanContext.Provider>
   );
 }
 

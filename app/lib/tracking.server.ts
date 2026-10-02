@@ -1,7 +1,10 @@
 import { UAParser } from "ua-parser-js";
+import { isbot } from "isbot";
+import crypto from "node:crypto";
 import prisma from "../db.server";
 import type { DeviceType } from "@prisma/client";
 import { hashIp, randomToken } from "./crypto.server";
+import { parseAcceptLanguage } from "./routing";
 
 export const SESSION_COOKIE = "tqr_sid";
 export const SESSION_TTL_DAYS = 7;
@@ -14,8 +17,18 @@ export interface ParsedRequest {
   browser: string | null;
   userAgent: string | null;
   referer: string | null;
+  /** Crawlers and link-preview bots (WhatsApp, iMessage, Slack…): not counted. */
+  isBot: boolean;
+  /** Visitor languages from Accept-Language, best first. */
+  languages: string[];
   sessionToken: string;
   setCookie: string | null; // null when an existing cookie was reused
+}
+
+/** Stable 0–1 value for a visitor + key (sticky A/B assignment). */
+export function visitorBucket(sessionToken: string, key: string): number {
+  const digest = crypto.createHash("sha256").update(`${sessionToken}|${key}`).digest();
+  return digest.readUInt32BE(0) / 0x100000000;
 }
 
 /** Best-effort client IP — supports a few common reverse proxies. */
@@ -91,13 +104,22 @@ export function parseRequest(req: Request): ParsedRequest {
     browser: browser.name || null,
     userAgent: ua || null,
     referer: req.headers.get("Referer"),
+    isBot: !ua || isbot(ua),
+    languages: parseAcceptLanguage(req.headers.get("Accept-Language")),
     sessionToken,
     setCookie,
   };
 }
 
+export interface ScanExtras {
+  /** Reference carried by the scan URL (?ref=…), e.g. an order number. */
+  ref?: string | null;
+  /** Smart-routing rule / A/B variant that served the scan. */
+  route?: string | null;
+}
+
 /** Insert a Scan row. Errors are swallowed — tracking must never block the redirect. */
-export async function recordScan(qrCodeId: string, parsed: ParsedRequest): Promise<string | null> {
+export async function recordScan(qrCodeId: string, parsed: ParsedRequest, extras: ScanExtras = {}): Promise<string | null> {
   try {
     const scan = await prisma.scan.create({
       data: {
@@ -110,6 +132,8 @@ export async function recordScan(qrCodeId: string, parsed: ParsedRequest): Promi
         browser: parsed.browser,
         userAgent: parsed.userAgent?.slice(0, 500) ?? null,
         referer: parsed.referer?.slice(0, 500) ?? null,
+        ref: extras.ref?.slice(0, 80) || null,
+        route: extras.route?.slice(0, 60) || null,
         delivered: true,
       },
       select: { id: true },
@@ -118,5 +142,14 @@ export async function recordScan(qrCodeId: string, parsed: ParsedRequest): Promi
   } catch (err) {
     console.error("[tracking] recordScan failed", err);
     return null;
+  }
+}
+
+/** Scan that hit the fallback URL instead of the destination. */
+export async function recordMissedScan(qrCodeId: string, reason: "PAUSED" | "SCHEDULED" | "EXPIRED" | "OVER_QUOTA" | "ARCHIVED") {
+  try {
+    await prisma.missedScan.create({ data: { qrCodeId, reason } });
+  } catch (err) {
+    console.error("[tracking] recordMissedScan failed", err);
   }
 }
